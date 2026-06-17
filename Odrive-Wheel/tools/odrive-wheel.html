@@ -3078,7 +3078,8 @@ const FIELD_DESC = {
     'axis.range':         'Rotação total do volante em graus (lock-to-lock). Default 900.',
     'axis.maxtorque':     'Torque máximo entregue ao motor em Nm. Sobe pra usar mais do motor; cuidado com mãos.',
     'axis.fxratio':       'Multiplicador final 0..1. Reduz force overall preservando dinâmicas. Default 0.80.',
-    'axis.invert':        'Inverte direção lógica do volante (sem mexer em fios). Quando ON, HID position + FFB torque do jogo são negados juntos — útil quando o motor está cabeado no sentido oposto. Persiste em EE.',
+    'axis.invert':        'Inverte apenas a posição HID reportada ao jogo (sem mexer em fios). Útil quando o encoder reporta sentido oposto ao esperado. Persiste em EE.',
+    'axis.ffbinvert':     'Inverte apenas o torque FFB recebido do jogo. Útil quando o FFB empurra na direção errada (ex: com FFFSake Forwarder). Persiste em EE.',
     'sys.vbusdiv':        'Divisor de tensão do VBUS sense (R1+R2)/R2. Default 19 (MKS XDrive Mini, 18k+1k). ODrive v3.6 oficial = 11. Valor errado afeta proteção de overvoltage e cálculo do brake — confira com multímetro depois de ajustar.',
     'axis.idlespring':    'Mola centralizadora SÓ quando jogo está OFF (FFB inativo). Volta a 0 quando jogo conecta. 0=desativado.',
     'axis.axisdamper':    'Damper SEMPRE ativo (com ou sem jogo conectado), somado ao FFB. Adiciona "peso" ao volante.',
@@ -3226,7 +3227,8 @@ const FIELD_DESC = {
     'axis.range':         'Total wheel rotation in degrees (lock-to-lock). Default 900.',
     'axis.maxtorque':     'Max torque delivered to motor in Nm. Raise to use more of motor; mind your hands.',
     'axis.fxratio':       'Final multiplier 0..1. Scales force overall while preserving dynamics. Default 0.80.',
-    'axis.invert':        'Reverses wheel logical direction (no rewiring needed). When ON, HID position + game FFB torque are negated together — useful when motor is wired the opposite way. Persists to EEPROM.',
+    'axis.invert':        'Inverts only the HID position reported to the game (no rewiring needed). Useful when the encoder reports the opposite direction. Persists to EEPROM.',
+    'axis.ffbinvert':     'Inverts only the FFB torque received from the game. Useful when FFB pushes in the wrong direction (e.g. with FFFSake Forwarder). Persists to EEPROM.',
     'sys.vbusdiv':        'VBUS sense voltage divider (R1+R2)/R2. Default 19 (MKS XDrive Mini, 18k+1k). Official ODrive v3.6 = 11. Wrong value affects overvoltage protection and brake calculation — verify with a multimeter after changing.',
     'axis.idlespring':    'Centering spring ONLY when game is OFF (FFB inactive). Returns to 0 when game connects. 0=disabled.',
     'axis.axisdamper':    'Damper ALWAYS active (with or without game connected), added to game FFB. Adds "weight" to wheel.',
@@ -3872,7 +3874,8 @@ const SCHEMA = [
       F('range',     'Rotation range'),                  // graus rotação total (default 900)
       F('maxtorque', 'Maximum torque'),                   // Nm cap (default 5.0, max recomendado 17 pelo motor)
       F('fxratio',   'Torque multiplier fxratio'),        // 0..1 — multiplicador final (default 0.80)
-      B('invert',    'Position and FFB invert'),          // inverte direção lógica (HID pos + FFB torque) sem mexer em fios
+      B('invert',    'Axis position invert'),             // inverte apenas a posição HID reportada ao jogo
+      B('ffbinvert', 'FFB torque invert'),               // inverte apenas o torque FFB recebido do jogo
 
       { group: 'Axis effects sempre-ativos (somam ao FFB do jogo)' },
       I('idlespring',   'Idle Spring'),         // mola centralizadora quando FFB OFF (0-255, default 0)
@@ -4245,7 +4248,8 @@ function buildCommandList() {
   offb('axis.range',         'Range do volante em counts');
   offb('axis.maxtorque',     'Maxtorque (limit final do FFB)');
   offb('axis.fxratio',       'Effect ratio (0-255)');
-  offb('axis.invert',        '0/1 — inverte sentido');
+  offb('axis.invert',        '0/1 — inverte posição HID');
+  offb('axis.ffbinvert',     '0/1 — inverte torque FFB');
   offb('axis.drvtype?',      'Tipo de driver atual');
   offb('axis.enctype?',      'Tipo de encoder atual');
   offb('axis.pos?',          'Posição atual em counts');
