@@ -450,6 +450,17 @@ static int h_axis_invert(uint8_t, CmdType t, const char *v, char *r, size_t s) {
     snprintf(r, s, "%d", ffb_get_axis_invert());
     return 0;
 }
+
+extern "C" int  ffb_get_ffb_invert(void);
+extern "C" void ffb_set_ffb_invert(int v);
+static int h_axis_ffbinvert(uint8_t, CmdType t, const char *v, char *r, size_t s) {
+    if (t == CMD_TYPE_SET) {
+        int val = parse_long(v, ffb_get_ffb_invert()) ? 1 : 0;
+        ffb_set_ffb_invert(val);
+    }
+    snprintf(r, s, "%d", ffb_get_ffb_invert());
+    return 0;
+}
 static int h_axis_drvtype(uint8_t, CmdType t, const char *v, char *r, size_t s) {
     (void)v;
     if (t == CMD_TYPE_EXEC) { snprintf(r, s, "5:ODrive (M0)"); return 0; }
@@ -765,6 +776,7 @@ const CmdEntry cmdtable[] = {
     { "axis",  "maxtorque",     h_axis_maxtorque },
     { "axis",  "fxratio",       h_axis_fxratio },
     { "axis",  "invert",        h_axis_invert },
+    { "axis",  "ffbinvert",     h_axis_ffbinvert },
     { "axis",  "drvtype",       h_axis_drvtype },
     { "axis",  "enctype",       h_axis_enctype },
     { "axis",  "pos",           h_axis_pos },
