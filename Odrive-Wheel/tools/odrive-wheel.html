@@ -1742,7 +1742,7 @@
   <div class="header-actions">
     <!-- Sponsor / BuyMeACoffee links (à esquerda do Connect) -->
     <span class="tool-version" title="HTML tool version"
-          style="font-size:11px;color:var(--muted);font-family:ui-monospace,Consolas,monospace;letter-spacing:0.5px;margin-right:2px">V0.12</span>
+          style="font-size:11px;color:var(--muted);font-family:ui-monospace,Consolas,monospace;letter-spacing:0.5px;margin-right:2px">V0.17</span>
     <a href="https://www.buymeacoffee.com/eduardogabq" target="_blank" rel="noopener"
        title="Buy Me a Coffee" data-i18n-title="btn.bmc_tip"
        style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:6px;background:#FFDD00;text-decoration:none;font-size:18px;line-height:1"
@@ -2421,6 +2421,8 @@ const I18N = {
     'setup.step6_title':       'Passo 6 — Configurar encoder',
     'setup.step6_desc':        'Edite os campos abaixo conforme o seu encoder. Defaults são pra ABZ incremental (caso mais comum — encoder externo no eixo do motor). Se você usa o AS5047P onboard da MKS, mude apenas mode=257, cpr=16384 e abs_spi_cs_gpio_pin=7. Os hints à direita explicam cada campo.',
     'setup.step6_apply':       '✓ Aplicar valores',
+    'setup.step6_save':        'Save',
+    'setup.step6_save_hint':   '← AS5047 (absoluto) precisa Salvar + reboot pra trocar de modo antes dos passos 7/8',
     'setup.step6_open':        '→ Abrir aba Encoder',
 
     'setup.step7_title':       'Passo 7 — Calibrar motor',
@@ -3340,6 +3342,8 @@ const I18N = {
     'setup.step6_title':       'Step 6 — Encoder configuration',
     'setup.step6_desc':        'Edit the fields below to match your encoder. Defaults are for incremental ABZ (most common — external encoder on the motor shaft). If you use the onboard MKS AS5047P, just change mode=257, cpr=16384 and abs_spi_cs_gpio_pin=7. Hints on the right explain each field.',
     'setup.step6_apply':       '✓ Apply values',
+    'setup.step6_save':        'Save',
+    'setup.step6_save_hint':   '← AS5047 (absolute) needs Save + reboot to switch modes before steps 7/8',
     'setup.step6_open':        '→ Open Encoder tab',
 
     'setup.step7_title':       'Step 7 — Motor calibration',
@@ -5967,6 +5971,38 @@ function wireInputsTab() {
 }
 
 /* =========================================================================
+   HID liveness tracker — global
+   -------------------------------------------------------------------------
+   Problema observado: indicadores de "conectado" em FFB Test, Overlay e PT
+   podem mentir. O firmware envia input reports a 1 kHz nativo; se param de
+   chegar (firmware travou, USB foi tomado por outra aba, cabo
+   desconectou sem disparar evento 'disconnect' do navegador), o device
+   ainda pode reportar device.opened === true mas writes silenciosamente
+   falham. Solução: instrumentar TODO open de HID com um listener leve que
+   apenas marca timestamp do último report — qualquer painel pode então
+   consultar _hidIsLive() pra saber se o firmware está realmente vivo.
+   ========================================================================= */
+let _hidLastReportT = 0;
+const _hidLivenessAttached = new WeakSet();
+const HID_LIVENESS_MAX_AGE_MS = 1000;  // firmware envia a 1 kHz; 1s = morto
+
+function _hidMarkLive() { _hidLastReportT = performance.now(); }
+
+function _hidEnsureLivenessListener(dev) {
+  if (!dev || _hidLivenessAttached.has(dev)) return;
+  _hidLivenessAttached.add(dev);
+  dev.addEventListener('inputreport', _hidMarkLive);
+}
+
+function _hidIsLive() {
+  return performance.now() - _hidLastReportT < HID_LIVENESS_MAX_AGE_MS;
+}
+
+function _hidIsOpenAndLive(dev) {
+  return !!(dev && dev.opened && _hidIsLive());
+}
+
+/* =========================================================================
    FFB Test tab — WebHID effect controller.
 
    Envia reports HID PID direto pelo navegador (sem mudança de firmware),
@@ -6129,10 +6165,21 @@ function wireFFBTestTab() {
   }
 
   // ---------- Helpers de envio HID ----------
+  // sendReport pode falhar mesmo com device.opened=true (firmware travou,
+  // outra aba tomou, USB recém-removido sem evento 'disconnect' ainda).
+  // Marca como desconectado e zera fbtDevice — próximo _fbtEnsureHid
+  // reabre limpo. Sem isso o indicador mente.
   const sendOutput = async (reportId, data) => {
     if (!fbtDevice) return;
     try { await fbtDevice.sendReport(reportId, new Uint8Array(data)); }
-    catch (e) { console.warn('HID OUT erro:', e); }
+    catch (e) {
+      console.warn('HID OUT erro:', e);
+      logLine('fbt: sendReport falhou (' + (e.message || e) + ') — marcando desconectado', 'err');
+      setConnState(false);
+      try { await fbtDevice.close(); } catch (_) {}
+      fbtDevice = null;
+      for (const k in fbtRunning) fbtRunning[k] = false;
+    }
   };
   // sendFeature mantido pra futuro (NEW_EFFECT) mas não usamos por agora.
 
@@ -6270,6 +6317,13 @@ function wireFFBTestTab() {
     await sendOutput(0x0D, [255]);      // DEVICE_GAIN: max
     setConnState(true);
     _fbtAttachDisconnectListener();
+    // Atacha listener leve de liveness — qualquer painel pode consultar
+    // _hidIsLive() pra saber se o firmware está realmente enviando reports.
+    _hidEnsureLivenessListener(fbtDevice);
+    // Bootstrap: input reports levam alguns ms pra chegar após attach;
+    // marca liveness "now" pra ensureHid logo seguir não disparar
+    // re-open desnecessário antes do primeiro report real.
+    _hidMarkLive();
   }
 
   async function _fbtAutoOpenPaired() {
@@ -6284,11 +6338,18 @@ function wireFFBTestTab() {
     } catch (e) { return false; }
   }
 
-  // ensureFbtHid: garante fbtDevice aberto. Usado pelos handlers de
-  // ação (effect enable) — precisam de gesto pra requestDevice se for
-  // primeira vez. Chamada de dentro de click handler funciona.
+  // ensureFbtHid: garante fbtDevice aberto E vivo. Se device.opened=true
+  // mas firmware silencioso há >1s, descarta e re-abre. Usado pelos
+  // handlers de ação (effect enable) — popup do browser só dispara se
+  // não houver device pareado, e sempre dentro de click handler.
   window._fbtEnsureHid = async function () {
-    if (fbtDevice && fbtDevice.opened) return true;
+    if (_hidIsOpenAndLive(fbtDevice)) return true;
+    if (fbtDevice && fbtDevice.opened) {
+      logLine('fbt: fbtDevice.opened=true mas sem reports — descartando e re-abrindo', 'warn');
+      try { await fbtDevice.close(); } catch (e) {}
+      fbtDevice = null;
+      setConnState(false);
+    }
     if (await _fbtAutoOpenPaired()) return true;
     try {
       const devices = await navigator.hid.requestDevice({
@@ -6309,6 +6370,27 @@ function wireFFBTestTab() {
   // Tenta auto-conectar imediatamente — se device já tava pareado, fica
   // conectado sem o user fazer nada.
   _fbtAutoOpenPaired();
+
+  // Watchdog reativo (1 Hz): indicador "connected" precisa cair se o
+  // firmware ficar silencioso (mais que 1.5s sem input report), mesmo
+  // sem o user interagir. Sem isso o usuário vê verde mas FFB não
+  // funciona, exatamente o sintoma reportado.
+  setInterval(() => {
+    if (!fbtConnected) return;
+    const hasDev = fbtDevice && fbtDevice.opened;
+    // Só age se algum painel anexou o liveness listener (ou seja, já
+    // recebeu input report alguma vez). _hidLastReportT === 0 = ainda
+    // não bootstrapou — nesse caso assume vivo, deixa _fbtEnsureHid
+    // resolver no próximo click.
+    if (!hasDev) {
+      setConnState(false);
+      return;
+    }
+    if (_hidLastReportT > 0 && performance.now() - _hidLastReportT > 1500) {
+      logLine('fbt: watchdog — firmware silencioso há >1.5s, marcando desconectado', 'warn');
+      setConnState(false);
+    }
+  }, 1000);
 
   document.getElementById('fbt-panic').addEventListener('click', stopAll);
 
@@ -6901,6 +6983,8 @@ function buildSetupHTML() {
     ], 'form')}
     ${_setupStepCard(6, 'setup.step6_title', 'setup.step6_desc', FORM_ENC, [
       { id: 'btn-setup-apply-enc', i18n: 'setup.step6_apply', cls: 'danger' },
+      { id: 'btn-setup-save-enc',  i18n: 'setup.step6_save',  cls: 'ok',
+        hint: 'setup.step6_save_hint' },
       { id: 'btn-setup-go-enc', i18n: 'setup.step6_open' }
     ], 'form')}
     ${_setupStepCard(7, 'setup.step7_title', 'setup.step7_desc',
@@ -7076,10 +7160,13 @@ function wireSetupTab() {
       el.textContent = v.toFixed(2) + ' V';
       el.style.color = v > 10 ? 'var(--ok)' : 'var(--warn)';
 
-      // 2. Calcula os 5 valores de proteção em torno da tensão real
+      // 2. Calcula os 5 valores de proteção em torno da tensão real.
+      // ramp_start = V+0.5 garante que duty do brake só começa a subir
+      // depois que a fonte realmente para de conseguir absorver (deixa
+      // pequena folga acima do nominal antes do brake atuar).
       const uv        = v - 5;
       const ov        = v + 5;
-      const rampStart = v;
+      const rampStart = v + 0.5;
       const rampEnd   = v + 3;
 
       // 3. Escreve TUDO usando _setupWriteFromForm com valores literais.
@@ -7170,7 +7257,9 @@ function wireSetupTab() {
     // que tiramos do form (mas que ainda precisam ser configurados):
     //   enable_brake_resistor = True
     //   dc_max_negative_current = -7
-    //   max_regen_current = 0
+    //   max_regen_current = 0.1   (threshold abaixo do qual regen vai pra
+    //                              fonte; valor pequeno mas != 0 evita que
+    //                              qualquer micro-regen dispare brake)
     const r = await _setupWriteFromForm([
       { path: 'config.brake_resistance',                type: 'number' },
       { path: 'config.dc_bus_undervoltage_trip_level',  type: 'number' },
@@ -7179,7 +7268,7 @@ function wireSetupTab() {
       { path: 'sys.vbusdiv',                            type: 'number' },
       { path: 'config.enable_brake_resistor',           type: 'bool',   value: true },
       { path: 'config.dc_max_negative_current',         type: 'number', value: -7 },
-      { path: 'config.max_regen_current',               type: 'number', value: 0 },
+      { path: 'config.max_regen_current',               type: 'number', value: 0.1 },
     ]);
     toast(t('setup.toast_written').replace('{ok}', r.ok).replace('{fail}', r.fail),
           r.fail === 0 ? 'ok' : 'warn');
@@ -7235,6 +7324,9 @@ function wireSetupTab() {
     toast(t('setup.toast_written').replace('{ok}', r.ok).replace('{fail}', r.fail),
           r.fail === 0 ? 'ok' : 'warn');
     if (r.fail === 0) _setupSetBtnState('btn-setup-apply-enc', 'ok');
+  });
+  document.getElementById('btn-setup-save-enc')?.addEventListener('click', () => {
+    document.getElementById('btn-save')?.click();
   });
   document.getElementById('btn-setup-go-enc')?.addEventListener('click', () => {
     selectTab('encoder');
@@ -7448,7 +7540,6 @@ function wireSetupTab() {
   });
   document.getElementById('btn-setup-z-skip')?.addEventListener('click', async () => {
     if (!writer) { toast(t('toast.connect_first_board'), 'err'); return; }
-    if (!confirm(t('setup.step10_skip_confirm'))) return;
     const status = document.getElementById('setup-step10-status');
     const btn    = document.getElementById('btn-setup-z-skip');
     const setSt = (key, color) => {
@@ -7456,6 +7547,25 @@ function wireSetupTab() {
       status.textContent = t(key);
       status.style.color = color || 'var(--fg-muted)';
     };
+
+    // Se o passo anterior já deixou o encoder pronto e pre_calibrated salvo
+    // (caso AS5047 absoluto, ou incremental com Z já configurado), Skip NÃO
+    // precisa rodar nova OFFSET_CAL nem religar startup_encoder_offset_cal —
+    // só marca o passo como concluído. Re-rodar seria redundante e ainda
+    // poderia introduzir startup_*_cal indesejado em setups absolutos.
+    const isReady  = parseInt(await readProp('axis0.encoder.is_ready') || '0', 10);
+    const preCalib = (await readProp('axis0.encoder.config.pre_calibrated') || '').trim() === 'True';
+    if (isReady === 1 && preCalib) {
+      logLine('step10 skip: encoder já is_ready + pre_calibrated — nada a recalibrar', 'tx');
+      setSt('setup.step10_skipped', 'var(--ok, #34d399)');
+      _setupSetBtnState('btn-setup-z-skip', 'ok');
+      toast(t('setup.step10_skipped'), 'ok');
+      return;
+    }
+
+    // Caminho original — incremental sem Z, encoder não saiu calibrado do
+    // passo anterior. Motor vai girar pra calibrar offset.
+    if (!confirm(t('setup.step10_skip_confirm'))) return;
     btn.disabled = true;
     try {
       // Skip do Z: precisa rodar OFFSET_CAL (sem index) pra deixar o encoder
@@ -7466,14 +7576,14 @@ function wireSetupTab() {
       await sendCmd('sc', false);
       await new Promise(r => setTimeout(r, 200));
 
-      // Divide calib_scan_distance por 5 antes do offset_cal pra reduzir
+      // Divide calib_scan_distance por 4 antes do offset_cal pra reduzir
       // movimento do volante (mesmo valor é persistido — vai valer também
       // pro offset_cal automático que vai rodar a cada boot).
       const csdRaw = await readProp('axis0.encoder.config.calib_scan_distance').catch(() => null);
       const csd    = parseFloat(csdRaw);
       if (isFinite(csd) && csd > 0) {
-        await writeProp('axis0.encoder.config.calib_scan_distance', (csd / 5).toFixed(4));
-        logLine(`step10 skip: calib_scan_distance ${csd.toFixed(2)} → ${(csd/5).toFixed(2)} (÷5)`, 'tx');
+        await writeProp('axis0.encoder.config.calib_scan_distance', (csd / 4).toFixed(4));
+        logLine(`step10 skip: calib_scan_distance ${csd.toFixed(2)} → ${(csd/4).toFixed(2)} (÷4)`, 'tx');
       }
 
       setSt('setup.step10_calibrating', 'var(--accent)');
@@ -8121,9 +8231,9 @@ function drawOvlBusChart() {
   // entram. Última amostra de cada série aparece junto pra dar leitura ao vivo.
   const legend = [];
   if (showV) legend.push({ c:'#4fc3f7', lbl:'vbus', val:overlayState.bus.vbus.at(-1), fmt:v=>v.toFixed(1)+'V' });
-  if (showI) legend.push({ c:'#ffa726', lbl:'ibus', val:overlayState.bus.ibus.at(-1), fmt:v=>v.toFixed(2)+'A' });
-  if (showQ) legend.push({ c:'#66bb6a', lbl:'Iq',   val:overlayState.bus.iq.at(-1),   fmt:v=>v.toFixed(2)+'A' });
-  if (showB) legend.push({ c:'#ef5350', lbl:'Ibr',  val:overlayState.bus.ibr.at(-1),  fmt:v=>v.toFixed(2)+'A' });
+  if (showI) legend.push({ c:'#ffa726', lbl:'ibus', val:overlayState.bus.ibus.at(-1), fmt:v=>_ovlFmtSigned2(v)+'A' });
+  if (showQ) legend.push({ c:'#66bb6a', lbl:'Iq',   val:overlayState.bus.iq.at(-1),   fmt:v=>_ovlFmtSigned2(v)+'A' });
+  if (showB) legend.push({ c:'#ef5350', lbl:'Ibr',  val:overlayState.bus.ibr.at(-1),  fmt:v=>_ovlFmtSigned2(v)+'A' });
   _ovlDrawLegend(ctx, legend, padL + W, padT);
 }
 
@@ -8206,10 +8316,17 @@ function drawOvlWhlChart() {
   plotTrace(overlayState.whl.trq, '#ef5350', tMin, tMax);
   plotTrace(overlayState.whl.pos, '#ab47bc', pMin, pMax);
 
-  // Legenda inline — torque + posição com leitura instantânea
+  // Legenda inline — torque + posição com leitura instantânea.
+  // τ é bidirecional → formatter signed pra evitar wobble na troca de sinal.
+  // pos também pode ser negativo (centro=0); usa slot manual de 1 char.
+  const fmtPosDeg = (v) => {
+    if (!isFinite(v)) return ' ---';
+    const sign = v < 0 ? '-' : ' ';
+    return sign + Math.min(999, Math.abs(v)).toFixed(0);
+  };
   const legend = [
-    { c:'#ef5350', lbl:'τ',   val:overlayState.whl.trq.at(-1), fmt:v=>v.toFixed(2)+'Nm' },
-    { c:'#ab47bc', lbl:'pos', val:overlayState.whl.pos.at(-1), fmt:v=>v.toFixed(0)+'°'  },
+    { c:'#ef5350', lbl:'τ',   val:overlayState.whl.trq.at(-1), fmt:v=>_ovlFmtSigned2(v)+'Nm' },
+    { c:'#ab47bc', lbl:'pos', val:overlayState.whl.pos.at(-1), fmt:v=>fmtPosDeg(v)+'°'  },
   ];
   _ovlDrawLegend(ctx, legend, padL + W, padT);
 }
@@ -8259,11 +8376,20 @@ function _ovlUpdateConnIndicator() {
   if (!doc) return;
   const el = doc.getElementById('pip-conn');
   if (!el) return;
-  const dev = overlayState.hidDevice;
-  if (dev && dev.opened) {
+  const dev   = overlayState.hidDevice;
+  const open  = !!(dev && dev.opened);
+  const live  = _hidIsLive();
+  if (open && live) {
     el.textContent = '● HID';
     el.classList.add('connected');
     el.classList.remove('disconnected');
+  } else if (open && !live) {
+    // device.opened=true mas firmware silencioso — provavelmente travado
+    // ou tomado por outra aba. Mostra estado intermediário pro user
+    // diferenciar de "cabo desconectado".
+    el.textContent = '⚠ sem reports';
+    el.classList.add('disconnected');
+    el.classList.remove('connected');
   } else {
     el.textContent = '✕ desconectado';
     el.classList.add('disconnected');
@@ -8341,6 +8467,16 @@ function _ovlFmtFixed(v, signed) {
   const sign = signed ? (v < 0 ? '-' : ' ') : '';
   const abs  = Math.min(99.9, Math.abs(v));
   return sign + abs.toFixed(1).padStart(4, '0');
+}
+
+// Variante com 2 casas decimais pra correntes na legenda do chart bus.
+// Mesma lógica: reserva slot ' ' ou '-' pro sinal, mantém colunas fixas
+// na fonte monoespaçada do canvas. Output: " 0.00", "-0.22", " 12.34".
+function _ovlFmtSigned2(v) {
+  if (!isFinite(v)) return ' --.--';
+  const sign = v < 0 ? '-' : ' ';
+  const abs  = Math.min(99.99, Math.abs(v));
+  return sign + abs.toFixed(2);
 }
 
 // Listener HID — chamado pelo browser 1× por inputreport (1 kHz). Parseia
@@ -8523,6 +8659,7 @@ function _ovlAttachHid(device) {
   overlayState.hidDevice   = device;
   overlayState.hidListener = _ovlOnHidReport;
   device.addEventListener('inputreport', overlayState.hidListener);
+  _hidEnsureLivenessListener(device);
   logLine('overlay: HID listener attached @ 1 kHz nativo', 'rx');
 }
 function _ovlDetachHid() {
@@ -8570,11 +8707,27 @@ function _ovlSetStatus(key, color) {
   el.style.color = color || '';
 }
 
-// Pega um HIDDevice usável — reusa ptDevice/fbtDevice se já aberto, senão
-// requisita um novo. Retorna null em caso de cancelamento/erro.
+// Pega um HIDDevice usável. Estratégia em camadas:
+//   1. Reusa ptDevice/fbtDevice/overlayState.hidDevice se aberto E vivo
+//      (firmware enviando reports há <1s)
+//   2. Reusa device aberto-mas-silencioso se for o ÚNICO disponível —
+//      o próprio listener do overlay vai re-validar quando os reports
+//      voltarem; melhor que disparar requestDevice que precisa de gesto
+//   3. Tenta getDevices() silent — devices já pareados nesta sessão
+//   4. Fallback: requestDevice (precisa de gesture do user)
 async function _ovlAcquireHidDevice() {
-  if (ptDevice  && ptDevice.opened)  return ptDevice;
-  if (fbtDevice && fbtDevice.opened) return fbtDevice;
+  if (_hidIsOpenAndLive(ptDevice))  return ptDevice;
+  if (_hidIsOpenAndLive(fbtDevice)) return fbtDevice;
+  if (_hidIsOpenAndLive(overlayState.hidDevice)) return overlayState.hidDevice;
+  // Sem device vivo conhecido — tenta open silent primeiro
+  try {
+    const devs = await navigator.hid.getDevices();
+    const match = devs.find(d => d.vendorId === 0x1209 && d.productId === 0x0D40);
+    if (match) {
+      if (!match.opened) await match.open();
+      return match;
+    }
+  } catch (e) {}
   try {
     const devices = await navigator.hid.requestDevice({
       filters: [{ vendorId: 0x1209, productId: 0x0D40 }]
@@ -9813,6 +9966,8 @@ function wirePerfTestTab() {
       if (!match.opened) await match.open();
       ptDevice = match;
       _ptAttachDisconnectListener();
+      _hidEnsureLivenessListener(ptDevice);
+      _hidMarkLive();  // bootstrap (ver _fbtSetupDeviceAfterOpen)
       ptUpdateHIDState(true);
       logLine('pt: HID auto-conectado a device pré-pareado', 'rx');
       return true;
@@ -9831,11 +9986,17 @@ function wirePerfTestTab() {
     });
   }
 
-  // ensurePtHid: garante que ptDevice está aberto. Se já tá, retorna true.
-  // Senão usa requestDevice (popup do browser — precisa estar num click
-  // handler do user pra funcionar). Chamado pelos handlers de Start/etc.
+  // ensurePtHid: garante que ptDevice está aberto E vivo. Se device.opened
+  // for true mas o firmware não enviou input report no último segundo
+  // (firmware travou, outra aba tomou, etc.), descarta e re-abre.
   window._ptEnsureHid = async function () {
-    if (ptDevice && ptDevice.opened) return true;
+    if (_hidIsOpenAndLive(ptDevice)) return true;
+    if (ptDevice && ptDevice.opened) {
+      logLine('pt: ptDevice.opened=true mas sem reports — descartando e re-abrindo', 'warn');
+      try { await ptDevice.close(); } catch (e) {}
+      ptDevice = null;
+      ptUpdateHIDState(false);
+    }
     // Tenta first via getDevices (silent — caso device tenha sido pareado
     // em outro lugar nessa mesma sessão)
     if (await _ptAutoOpenPaired()) return true;
@@ -9848,6 +10009,7 @@ function wirePerfTestTab() {
       ptDevice = devices[0];
       if (!ptDevice.opened) await ptDevice.open();
       _ptAttachDisconnectListener();
+      _hidEnsureLivenessListener(ptDevice);
       ptUpdateHIDState(true);
       return true;
     } catch (e) {

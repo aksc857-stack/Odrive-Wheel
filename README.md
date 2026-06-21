@@ -5,6 +5,11 @@ Custom firmware for ODrive v0.5.6 running on **MKS XDrive Mini** and
 full **HID Force Feedback** support to use the motor as a sim racing wheel.
 
 <p align="center">
+  <a href="https://eagabriel.github.io/Odrive-Wheel/"><b>🛠 Open the configuration tool →</b></a><br>
+  <sub>Runs in Chrome/Edge — no install. Connects via Web Serial / WebHID.</sub>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/MKSXdriveMini.png" alt="MKS XDrive Mini board" width="420">
   <img src="docs/screenshots/Overlay%20FFT.png" alt="PiP Overlay with live FFT spectrum analyzer" width="420">
 </p>
