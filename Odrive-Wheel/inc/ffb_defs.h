@@ -125,6 +125,11 @@ struct  __attribute__((__packed__)) reportHID_t {
 		int16_t RZ = 0;
 		int16_t Dial = 0;
 		int16_t Slider = 0;
+		// Telemetria 1 kHz extra pro overlay HID-only (escala ×100).
+		// Range ±327.67 (V/A) cobre vbus 48V/56V e regen pesado folgado.
+		int16_t VBus   = 0;   // vbus_voltage × 100      (V × 100)
+		int16_t IBus   = 0;   // ibus × 100              (A × 100)
+		int16_t IBrake = 0;   // brake_resistor_current × 100 (A × 100)
 };
 /**
  * Helper class for double buffered HID gamepad reports to allow use of different datatypes for main axes

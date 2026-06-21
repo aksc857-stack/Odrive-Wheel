@@ -136,13 +136,32 @@ bool Stm32Gpio::subscribe(bool rising_edge, bool falling_edge, void (*callback)(
     }
 
     EXTI->EMR &= ~((uint32_t)pin_mask_);
-    EXTI->IMR |= (uint32_t)pin_mask_;
 
-    // Clear any previous triggers
-    __HAL_GPIO_EXTI_CLEAR_IT(pin_mask_);
-    
+    // ORDEM CRITICA — fix de IRQ espuria/perdida:
+    //   1. Registrar callback ANTES de habilitar IRQ (linha 144-145
+    //      movidas pra ca). Garante que se uma IRQ pendente disparar
+    //      logo apos enable, ela ainda chama o callback novo, nao um
+    //      nullptr (que era no-op e "consumia" silenciosamente a IRQ).
+    //   2. Limpar flag pendente ANTES de habilitar IMR (linha 142
+    //      movida pra ca). Sem isso, qualquer transicao acumulada antes
+    //      do subscribe (boot energization, ruido EMI durante init dos
+    //      perifericos do motor) ficou no PR e dispara IRQ falsa no
+    //      instante que o IMR ativa.
+    //
+    // Bug original: subscribe → IMR_enable → CLEAR → set_callback.
+    // Janela problematica entre IMR_enable e CLEAR/set_callback faz
+    // IRQ pendente (ou rapida) ser processada com callback=nullptr,
+    // depois o EXTI fica desinscrito e o pulso Z real e perdido.
     subscription.ctx = ctx;
     subscription.callback = callback;
+
+    // Clear any previous triggers (deve vir DEPOIS de set_callback
+    // mas ANTES de IMR enable)
+    __HAL_GPIO_EXTI_CLEAR_IT(pin_mask_);
+
+    // So agora habilita o IRQ — callback ja registrado, PR ja limpo
+    EXTI->IMR |= (uint32_t)pin_mask_;
+
     return true;
 }
 

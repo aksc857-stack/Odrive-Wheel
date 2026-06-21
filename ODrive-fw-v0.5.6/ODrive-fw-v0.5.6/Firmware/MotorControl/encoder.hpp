@@ -147,6 +147,25 @@ public:
     uint16_t abs_spi_dma_rx_[1];
     Stm32SpiArbiter::SpiTask spi_task_;
 
+    // MKS XDrive Mini debug — contadores expostos pra command sys.encraw!
+    // (já estamos numa seção public: aberta no topo da classe)
+    uint32_t abs_spi_ok_count_     = 0;  // # de transações com parity+EF OK
+    uint32_t abs_spi_fail_parity_  = 0;  // # de rejeitadas por paridade ruim
+    uint32_t abs_spi_fail_ef_      = 0;  // # de rejeitadas com EF=1
+    uint32_t abs_spi_fail_xfer_    = 0;  // # de transfer() retornando false
+    uint16_t abs_spi_last_rx_      = 0;  // último raw recebido (qualquer status)
+
+    // AS5047 DIAAGC register (0x3FFC) snapshot pra sys.magnet!
+    // Atualizado a cada 256 transações (~31 Hz @ 8 kHz update). Bits do raw:
+    //   [7:0]  AGC value (0-255, ideal ≈ 128)
+    //   [8]    LF — Loop Finished (offset compensation done)
+    //   [9]    COF — CORDIC Overflow
+    //   [10]   MAGH — Magnetic field too strong (magnet too close)
+    //   [11]   MAGL — Magnetic field too weak (magnet too far)
+    uint16_t diaagc_raw_           = 0;  // valor cru da última leitura DIAAGC
+    uint32_t diaagc_update_count_  = 0;  // # de leituras DIAAGC bem-sucedidas
+    uint16_t abs_spi_cmd_phase_    = 0;  // contador interno pra interleaving
+
     constexpr float getCoggingRatio(){
         return 1.0f / 3600.0f;
     }

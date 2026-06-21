@@ -14,7 +14,8 @@
 // Histórico:
 //   0x0001 — layout inicial (S10/S11, 128K pages)
 //   0x0002 — layout movido pra S1/S2 (16K pages) após colisão com ODrive NVM
-#define EE_LAYOUT_VERSION       0x0002
+//   0x0003 — adicionados ADR_GPIO_AXIS_FLAGS + ADR_GPIO_AXIS_FREQ_X10 (NB_OF_VAR 45→47)
+#define EE_LAYOUT_VERSION       0x0003
 
 // System / meta
 #define ADR_SYSTEM_MARKER       0x0001
@@ -82,9 +83,15 @@
 // Armazenado como uint16 mas só usa os 8 LSBs.
 #define ADR_VBUS_DIVIDER        0x0260
 
-// 45 entradas: 4 system + 7 ffb + 12 axis (10 + 2 ZEROOFS) + 5 odrive
-//             + 15 gpio (5 pinos × 3 campos) + 1 vbus_divider + 1 reserve
-#define NB_OF_VAR 45
+// GPIO axis processor (port AnalogAxisProcessing): flags bitmap + freq.
+// Bits: bit0=filter_enabled, bit1=autorange_enabled. Outros bits reservados.
+// freq_x10: cutoff em décimos de Hz (ex: 600 = 60.0 Hz). Range 5..5000 (0.5-500Hz).
+#define ADR_GPIO_AXIS_FLAGS     0x0270
+#define ADR_GPIO_AXIS_FREQ_X10  0x0271
+
+// 47 entradas: 4 system + 7 ffb + 12 axis (10 + 2 ZEROOFS) + 5 odrive
+//             + 15 gpio (5 pinos × 3 campos) + 1 vbus_divider + 2 axis_proc
+#define NB_OF_VAR 47
 extern const uint16_t VirtAddVarTab[NB_OF_VAR];
 
 #endif

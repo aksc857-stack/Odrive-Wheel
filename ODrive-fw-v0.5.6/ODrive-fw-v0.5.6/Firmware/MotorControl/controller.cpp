@@ -51,6 +51,12 @@ void Controller::start_anticogging_calibration() {
     // Ensure the cogging map was correctly allocated earlier and that the motor is capable of calibrating
     if (axis_->error_ == Axis::ERROR_NONE) {
         config_.anticogging.calib_anticogging = true;
+        // Garante que feedforward NÃO contamine a medida do vel_integrator_torque
+        // durante a cal. Se valid já está true (mapa anterior carregado), seria
+        // somado em `torque +=` na linha ~383 e a leitura do integrador refletiria
+        // só o RESÍDUO, não o cogging total. No fim da cal (linha ~99) valid é
+        // re-setado pra true automaticamente.
+        anticogging_valid_ = false;
     }
 }
 
@@ -141,6 +147,22 @@ static float limitVel(const float vel_limit, const float vel_estimate, const flo
 }
 
 bool Controller::update() {
+    // Phase 1 anticogging activation fix: o flag anticogging_valid_ é privado
+    // e só vira true em paths específicos (encoder.cpp: setup() pra encoder SPI
+    // absoluto, ou enc_index_cb() pra incremental+Z com encoder.pre_calibrated).
+    // Pra carga manual de cogging_map via comando K (host-side Phase 1), nenhum
+    // desses paths dispara confiavelmente. Lazy-init aqui: se pre_calibrated
+    // for true, ativa anticogging_valid_ assim que o controller começar a rodar.
+    // Indep. do tipo de encoder. O runtime check `if (!anticogging_pos_estimate
+    // .has_value()) return ...` mais abaixo (~linha 365) já protege contra usar
+    // map com encoder não-pronto.
+    // EXCEÇÃO: durante calib_anticogging (cal nativo), NÃO re-armar valid,
+    // senão o feedforward contaminaria a medida de vel_integrator_torque que
+    // o cal grava no map[idx].
+    if (config_.anticogging.pre_calibrated && !anticogging_valid_ && !config_.anticogging.calib_anticogging) {
+        anticogging_valid_ = true;
+    }
+
     std::optional<float> pos_estimate_linear = pos_estimate_linear_src_.present();
     std::optional<float> pos_estimate_circular = pos_estimate_circular_src_.present();
     std::optional<float> pos_wrap = pos_wrap_src_.present();

@@ -300,6 +300,15 @@ static int h_gpio_cur(uint8_t inst, CmdType t, const char*, char *r, size_t s) {
     return 0;
 }
 
+// Último valor filtrado (após Biquad do axis processor). 0..4095 em counts
+// ADC, mesmo formato do `cur`. 65535 = nunca foi processado (não-AXIS).
+extern "C" uint16_t gpio_inputs_get_filt(uint8_t inst);
+static int h_gpio_filt(uint8_t inst, CmdType t, const char*, char *r, size_t s) {
+    if (t != CMD_TYPE_GET) return -1;
+    snprintf(r, s, "%u", (unsigned)gpio_inputs_get_filt(inst));
+    return 0;
+}
+
 // sys.reboot — Configurator às vezes oferece botão. Stub respondendo OK
 // (nao reboota de verdade pra evitar perda de estado durante probe).
 static int h_sys_reboot(uint8_t, CmdType t, const char*, char *r, size_t s) {
@@ -504,6 +513,34 @@ static int h_axis_zeroenc(uint8_t, CmdType t, const char*, char *r, size_t s) {
     return 0;
 }
 
+// axis.zeroofs — leitura/escrita do offset persistente em graus.
+// Útil pra UI mostrar o que zeroenc! capturou, ou pra resetar manualmente
+// (axis.zeroofs=0 → desfaz o centro). Persiste em sys.save! via 2 slots EE.
+extern "C" float ffb_get_axis_zeroofs(void);
+extern "C" void  ffb_set_axis_zeroofs(float v);
+static int h_axis_zeroofs(uint8_t, CmdType t, const char *v, char *r, size_t s) {
+    if (t == CMD_TYPE_SET) ffb_set_axis_zeroofs(parse_float(v, ffb_get_axis_zeroofs()));
+    snprintf(r, s, "%.3f", (double)ffb_get_axis_zeroofs());
+    return 0;
+}
+
+// Contadores do callback do Z — diagnostico de leitura do pulso index
+// pelo STM32 EXTI. Escreve qualquer valor (tipico 0) pra resetar.
+extern "C" uint32_t ffb_get_z_hits(void);
+extern "C" void     ffb_set_z_hits(uint32_t v);
+extern "C" uint32_t ffb_get_z_glitches(void);
+extern "C" void     ffb_set_z_glitches(uint32_t v);
+static int h_axis_zhits(uint8_t, CmdType t, const char *v, char *r, size_t s) {
+    if (t == CMD_TYPE_SET) ffb_set_z_hits((uint32_t)parse_long(v, (long)ffb_get_z_hits()));
+    snprintf(r, s, "%lu", (unsigned long)ffb_get_z_hits());
+    return 0;
+}
+static int h_axis_zglitch(uint8_t, CmdType t, const char *v, char *r, size_t s) {
+    if (t == CMD_TYPE_SET) ffb_set_z_glitches((uint32_t)parse_long(v, (long)ffb_get_z_glitches()));
+    snprintf(r, s, "%lu", (unsigned long)ffb_get_z_glitches());
+    return 0;
+}
+
 // Anticogging calibration trigger via cmdparser OpenFFBoard.
 // Workaround pra `calib_anticogging` ser readonly no YAML do ODrive (write
 // via ASCII responde "not implemented"). Síntaxe: axis.anticogcal!
@@ -524,6 +561,40 @@ static int h_axis_anticogcal(uint8_t, CmdType t, const char*, char *r, size_t s)
     int ok = odrive_bridge_start_anticogcal();
     strncpy(r, ok ? "OK" : "FAIL (verifique axis0.error e estado closed_loop)", s);
     return ok ? 0 : -1;
+}
+
+// ============= GPIO axis processor (AnalogAxisProcessing port simplificado) =============
+// Apenas Biquad filter (por canal HID) + flag autocal global.
+// Min/max real ficam no AMIN/AMAX existentes por GPIO (gpio_inputs.N.amin/amax).
+extern "C" {
+    int   axis_proc_get_filter_enabled(void);
+    void  axis_proc_set_filter_enabled(int en);
+    int   axis_proc_get_autorange_enabled(void);
+    void  axis_proc_set_autorange_enabled(int en);
+    float axis_proc_get_filter_freq(void);
+    void  axis_proc_set_filter_freq(float hz);
+}
+
+// axis.gpiofilt — habilita filtro low-pass Biquad pros GPIOs em modo axis
+static int h_axis_gpiofilt(uint8_t, CmdType t, const char *v, char *r, size_t s) {
+    if (t == CMD_TYPE_SET) axis_proc_set_filter_enabled((int)parse_long(v, axis_proc_get_filter_enabled()));
+    snprintf(r, s, "%d", axis_proc_get_filter_enabled());
+    return 0;
+}
+
+// axis.gpiofiltf — cutoff do filtro em Hz (0.5-500)
+static int h_axis_gpiofiltf(uint8_t, CmdType t, const char *v, char *r, size_t s) {
+    if (t == CMD_TYPE_SET) axis_proc_set_filter_freq(parse_float(v, axis_proc_get_filter_freq()));
+    snprintf(r, s, "%.2f", (double)axis_proc_get_filter_freq());
+    return 0;
+}
+
+// axis.gpioautocal — habilita autocal global (logica de update em gpio_inputs.cpp,
+// que escreve direto nos AMIN/AMAX existentes por GPIO)
+static int h_axis_gpioautocal(uint8_t, CmdType t, const char *v, char *r, size_t s) {
+    if (t == CMD_TYPE_SET) axis_proc_set_autorange_enabled((int)parse_long(v, axis_proc_get_autorange_enabled()));
+    snprintf(r, s, "%d", axis_proc_get_autorange_enabled());
+    return 0;
 }
 
 // Live readouts (read-only)
@@ -704,6 +775,63 @@ static int h_sys_ping(uint8_t, CmdType, const char*, char *r, size_t s) {
     strncpy(r, "pong", s); return 0;
 }
 
+// encraw! — snapshot dos contadores SPI do encoder + último raw recebido
+// pra debug do AS5047. Resposta:
+//   "ok=N pty=N ef=N xfr=N last=0xNNNN pos=NNNN"
+// Onde:
+//   ok    — # transações que passaram parity + EF check (pos_abs atualiza)
+//   pty   — # transações rejeitadas por parity ruim
+//   ef    — # transações com EF=1 (chip reportou erro de comm)
+//   xfr   — # transações com transfer() falhando (timeout HAL)
+//   last  — raw 16-bit recebido na última transação (qualquer resultado)
+//   pos   — pos_abs cacheado (só atualiza em transação OK)
+// Roda 2× com 1s entre as chamadas pra ver os deltas — diz EXATAMENTE
+// onde a falha tá:
+//   ok subindo = sucesso, pos deveria mudar conforme magneto move
+//   pty subindo = SPI integridade (bits flippando)
+//   ef subindo = AS5047 setando EF (precisa repensar setup)
+//   xfr subindo = transfer() falhando (raro)
+//   last variando entre calls = AS5047 enviando dado fresh ✓
+//   last fixo = AS5047 enviando mesmo byte (chip travado ou OTP errado)
+// magnet! — leitura do DIAAGC register do AS5047. Resposta:
+//   "agc=N magl=N magh=N cof=N lf=N updates=N status=TXT"
+// Interpretação:
+//   agc 0-255   — AGC value. Ideal ~128. <50 = magneto perto demais. >200 = longe.
+//   magl=1      — Magnetic Low: campo fraco demais (magneto longe ou faltando)
+//   magh=1      — Magnetic High: campo forte demais (magneto perto demais)
+//   cof=1       — CORDIC Overflow: cálculo angular inválido (raro)
+//   lf=1        — Loop Finished: offset compensation rodou OK no boot
+//   updates     — # de leituras DIAAGC desde boot (deve crescer ~31/seg)
+//   status      — heurística textual: OK/WEAK/STRONG/MISSING/NOT_READY
+static int h_sys_magnet(uint8_t, CmdType t, const char*, char *r, size_t s) {
+    if (t != CMD_TYPE_EXEC && t != CMD_TYPE_GET) return -1;
+    struct magnet_snap_t snap;
+    odrive_bridge_enc_get_magnet(&snap);
+    const char *status;
+    if (snap.update_count == 0)               status = "NOT_READY";
+    else if (snap.magl)                       status = "MAGNET_TOO_FAR";
+    else if (snap.magh)                       status = "MAGNET_TOO_CLOSE";
+    else if (!snap.lf)                        status = "WAITING_COMPENSATION";
+    else if (snap.cof)                        status = "CORDIC_OVERFLOW";
+    else if (snap.agc < 30 || snap.agc > 220) status = "MARGINAL";
+    else                                      status = "OK";
+    snprintf(r, s, "agc=%u magl=%u magh=%u cof=%u lf=%u updates=%u status=%s",
+             snap.agc, snap.magl, snap.magh, snap.cof, snap.lf,
+             snap.update_count, status);
+    return 0;
+}
+
+// encraw_snap_t e odrive_bridge_enc_get_raw já declarados em odrive_bridge.h
+static int h_sys_encraw(uint8_t, CmdType t, const char*, char *r, size_t s) {
+    if (t != CMD_TYPE_EXEC && t != CMD_TYPE_GET) return -1;
+    struct encraw_snap_t snap;
+    odrive_bridge_enc_get_raw(&snap);
+    snprintf(r, s, "ok=%u pty=%u ef=%u xfr=%u last=0x%04X pos=%u",
+             snap.ok_count, snap.fail_parity, snap.fail_ef,
+             snap.fail_xfer, snap.last_rx, snap.pos_abs);
+    return 0;
+}
+
 // fxtest — diagnóstico FFB sumarizado em uma linha
 extern int   ffb_is_active(void);
 extern float ffb_get_pending_torque_nm(void);
@@ -790,7 +918,14 @@ const CmdEntry cmdtable[] = {
     { "axis",  "maxtorquerate", h_axis_maxtorquerate },  // slew limit (counts/ms, 0=off)
     { "axis",  "expo",          h_axis_expo },           // curva exponencial (-32767..32767)
     { "axis",  "exposcale",     h_axis_exposcale },      // divisor pro expo (1-255)
-    { "axis",  "zeroenc",       h_axis_zeroenc },        // zera posição atual
+    { "axis",  "zeroenc",       h_axis_zeroenc },        // zera posição atual (EXEC)
+    { "axis",  "zeroofs",       h_axis_zeroofs },        // offset persistente em graus (GET/SET)
+    { "axis",  "zhits",         h_axis_zhits },          // contador de pulsos Z aceitos (GET/SET=reset)
+    { "axis",  "zglitch",       h_axis_zglitch },        // contador de IRQs Z rejeitadas como glitch
+    // GPIO axis processor (port simplificado do AnalogAxisProcessing)
+    { "axis",  "gpiofilt",      h_axis_gpiofilt },       // habilita filter low-pass global
+    { "axis",  "gpiofiltf",     h_axis_gpiofiltf },      // cutoff do filter em Hz (default 60)
+    { "axis",  "gpioautocal",   h_axis_gpioautocal },    // habilita autocal global (atualiza AMIN/AMAX)
     { "axis",  "anticogcal",    h_axis_anticogcal },     // dispara anticogging calibration
     // Live readouts (read-only)
     { "axis",  "curtorque",     h_axis_curtorque },
@@ -826,9 +961,12 @@ const CmdEntry cmdtable[] = {
     { "gpio",  "amin",         h_gpio_amin },         // 0-4095 (só axis)
     { "gpio",  "amax",         h_gpio_amax },         // 0-4095 (só axis)
     { "gpio",  "cur",          h_gpio_cur },          // raw atual (debug/UI)
+    { "gpio",  "filt",         h_gpio_filt },         // último valor filtrado (debug/UI)
     { "sys",   "reboot",       h_sys_reboot },        // reset chip
     { "sys",   "uptime",       h_sys_uptime },
     { "sys",   "ping",         h_sys_ping },
+    { "sys",   "encraw",       h_sys_encraw },        // Encoder SPI debug counters
+    { "sys",   "magnet",       h_sys_magnet },        // AS5047 DIAAGC (magnet status)
     { "sys",   "fxtest",       h_sys_fxtest },
 
     // odrv.* (read-only; Configurator não escreve hardware aqui)

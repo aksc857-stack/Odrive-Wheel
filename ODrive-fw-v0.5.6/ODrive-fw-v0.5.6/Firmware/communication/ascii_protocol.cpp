@@ -309,6 +309,63 @@ void AsciiProtocol::process_line(cbufptr_t buffer) {
             }
             break;
         }
+        case 'K': {                                                            // Cogging map write — K <index> <value>
+            // O array cogging_map[3600] NÃO está exposto na interface YAML do
+            // ODrive 0.5.6, então `w axis0.controller.config.anticogging.cogging_map[N] V`
+            // dá "invalid property". Este comando custom escreve direto na struct.
+            // Responde com idx + valor recém-escrito pra confirmação (debug).
+            unsigned int idx = 0;
+            float val = 0.0f;
+            int n = sscanf(cmd, "K %u %f", &idx, &val);
+            if (n == 2 && idx < 3600) {
+                axes[0].controller_.config_.anticogging.cogging_map[idx] = val;
+                respond(use_checksum, "K%u=%.6f", idx, (double)val);
+            } else {
+                respond(use_checksum, "Kerr n=%d idx=%u", n, idx);
+            }
+            break;
+        }
+        case 'k': {                                                            // Cogging map read — k <index>
+            unsigned int idx = 0;
+            if (sscanf(cmd, "k %u", &idx) == 1 && idx < 3600) {
+                respond(use_checksum, "%.6f",
+                    (double)axes[0].controller_.config_.anticogging.cogging_map[idx]);
+            } else {
+                respond(use_checksum, "invalid");
+            }
+            break;
+        }
+        case 'J': {                                                            // Anticogging valid force — J <0|1>
+            // Força axes[0].controller_.anticogging_valid_ runtime.
+            // Útil pra testar a compensação sem depender do path
+            // do encoder (que pode não disparar dependendo do tipo de
+            // encoder + flags). Não persiste em reboot.
+            unsigned int val = 0;
+            if (sscanf(cmd, "J %u", &val) == 1) {
+                axes[0].controller_.anticogging_valid_ = (val != 0);
+            }
+            break;
+        }
+        case 'j': {                                                            // Anticogging valid read — j
+            // Retorna o estado de anticogging_valid_ runtime — flag que decide
+            // se torque += cogging_map[idx] é injetado a cada ciclo do controller.
+            respond(use_checksum, "%d", axes[0].controller_.anticogging_valid_ ? 1 : 0);
+            break;
+        }
+        case 'Y': {                                                            // Trigger native anticogging cal — Y
+            // calib_anticogging é readonly na interface YAML do ODrive, então
+            // `w axis0...calib_anticogging 1` retorna "invalid property". Este
+            // comando custom chama Controller::start_anticogging_calibration()
+            // que: 1) seta calib_anticogging=true (cal começa no próximo update),
+            // 2) seta anticogging_valid_=false (pra não contaminar a medida).
+            // Pré-requisitos: motor calibrado, axis em CLOSED_LOOP_CONTROL,
+            // sem erros. Cal dura ~3600 * anticogging_speed segundos.
+            axes[0].controller_.start_anticogging_calibration();
+            respond(use_checksum, "Y started=%d valid=%d",
+                axes[0].controller_.config_.anticogging.calib_anticogging ? 1 : 0,
+                axes[0].controller_.anticogging_valid_ ? 1 : 0);
+            break;
+        }
         default : cmd_unknown(nullptr, use_checksum);                 break;
     }
 }

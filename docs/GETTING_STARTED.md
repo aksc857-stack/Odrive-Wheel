@@ -269,7 +269,7 @@ Adjust the voltage settings according to the voltage of your power supply.
 ### 7. First closed-loop test (no FFB yet)
 
 1. **Debug / Status** tab → action **Closed loop** (`w axis0.requested_state 8`).
-2. Enter in FFB Test, use the buttom connect HID device. Starting activating spring and feel if its acting the right way.
+2. Enter in FFB Force Test, use the buttom connect HID device. Starting activating spring and feel if its acting the right way.
 3. If you don't feel any force try to slide it to 100%. if nothing happen at all take a look if there is some erro in debug/status page
 4. All good → disarm with `w axis0.requested_state 1` (IDLE).
 
@@ -294,7 +294,7 @@ Save → reboot.
 
 ### 9. Validate FFB
 
-1. Use the FFB test on https://eagabriel.github.io/Odrive-Wheel/ to exercise each effect and adjust currents and voltages.
+1. Use the FFB Force Test tab on https://eagabriel.github.io/Odrive-Wheel/ to exercise each effect and adjust currents and voltages.
 2. In Windows, `joy.cpl` → "Odrive-Wheel" → **Test Forces** tab if available, many windows version don't have it
 
 If you feel torque proportional to the input → FFB is working. Raise `maxtorque` slowly (2 → 4 → 6 Nm) adjust the currents imits if needed.

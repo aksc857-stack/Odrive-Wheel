@@ -60,15 +60,14 @@ public:
     // Volante (escalonamento básico)
     float rangeDegrees_  = 900.0f;    // steering lock-to-lock
     float maxTorque_Nm_  = 5.0f;      // scaling do torque FFB (int32 -> Nm)
-    float fxRatio_       = 0.80f;     // 0..1 — margem pra endstop futuro
+    float fxRatio_       = 1.0f;      // 0..1 — escala final (1.0 = sem perda)
 
     // ----------- Axis effects (sempre ativos, somam ao FFB do jogo) ---------
-    // Defaults TODOS em 0 — não muda comportamento até user setar.
     uint8_t idleSpring_     = 0;      // spring centralizadora quando FFB inativo
     uint8_t axisDamper_     = 0;      // damper sempre ativo (resistência velocidade)
     uint8_t axisInertia_    = 0;      // inertia sempre ativa (resistência aceleração)
     uint8_t axisFriction_   = 0;      // friction sempre ativa (atrito constante)
-    uint8_t endstopStrength_= 0;      // batente eletrônico: força da mola na região >±range/2 (0-255)
+    uint8_t endstopStrength_= 15;     // batente eletrônico: força da mola na região >±range/2 (0-255). 15 = leve por default.
     uint8_t endstopDamper_  = 15;     // amortecimento do endstop, INDEPENDENTE de esgain (0-255). 15 ~ leve.
 
     // Slew rate — limita derivada do torque. 0 = desativado (sem limit).
@@ -347,6 +346,30 @@ static void ffb_thread(void *arg) {
             // Phase 4.x — popula buttons + axes extras (RX/RY/RZ/Slider) a partir
             // dos GPIOs 1-4 configurados em modo button/axis.
             gpio_inputs_update_report(&rpt.buttons, &rpt.RX, &rpt.RY, &rpt.RZ, &rpt.Slider);
+            // Telemetria 1 kHz nos axes não usados (Y, Z, Dial, +VBus/IBus/IBrake):
+            //   Y      = vel_estimate × 1000 (turns/s × 1000, range ±32.767 t/s)
+            //   Z      = Iq_measured × 1000  (A × 1000,       range ±32.767 A)
+            //   Dial   = torque_output × 1000 (Nm × 1000,     range ±32.767 N·m)
+            //   VBus   = vbus_voltage × 100  (V × 100,        range ±327.67 V)
+            //   IBus   = ibus × 100          (A × 100,        range ±327.67 A)
+            //   IBrake = brake_resistor_current × 100 (A × 100, range ±327.67 A)
+            // Clamp pra não wrap em motores/PSUs extremos.
+            auto sat = [](float v) -> int16_t {
+                if (v >  32.767f) return  32767;
+                if (v < -32.767f) return -32767;
+                return (int16_t)(v * 1000.0f);
+            };
+            auto sat100 = [](float v) -> int16_t {
+                if (v >  327.67f) return  32767;
+                if (v < -327.67f) return -32767;
+                return (int16_t)(v * 100.0f);
+            };
+            rpt.Y      = sat(odrive_bridge_get_vel_estimate());
+            rpt.Z      = sat(odrive_bridge_get_iq_measured());
+            rpt.Dial   = sat(odrive_bridge_get_torque_output());
+            rpt.VBus   = sat100(odrive_bridge_get_vbus());
+            rpt.IBus   = sat100(odrive_bridge_get_ibus());
+            rpt.IBrake = sat100(odrive_bridge_get_brake_resistor_current());
             // report_id=1: tud_hid_report strippa o id; payload = buttons..Slider
             tud_hid_report(1, ((uint8_t*)&rpt) + 1, sizeof(rpt) - 1);
         }
@@ -425,6 +448,27 @@ extern "C" void ffb_init_storage_early(void) {
         uint16_t v;
         if (Flash_Read(ADR_VBUS_DIVIDER, &v, false) && v != 0xFFFF && v >= 1 && v <= 50) {
             ffb_set_vbus_divider((int)v);
+        }
+    }
+
+    // GPIO axis processor — restaura flags + freq do EE.
+    // axis_proc_init() inicializa Biquads com defaults; aqui sobrescrevemos
+    // com config salva (se houver).
+    {
+        extern void  axis_proc_init(void);
+        extern void  axis_proc_set_filter_enabled(int en);
+        extern void  axis_proc_set_autorange_enabled(int en);
+        extern void  axis_proc_set_filter_freq(float hz);
+        axis_proc_init();
+        uint16_t flags = 0xFFFF;
+        if (Flash_Read(ADR_GPIO_AXIS_FLAGS, &flags, false) && flags != 0xFFFF) {
+            axis_proc_set_filter_enabled((flags & 0x01) ? 1 : 0);
+            axis_proc_set_autorange_enabled((flags & 0x02) ? 1 : 0);
+        }
+        uint16_t freq_x10 = 0xFFFF;
+        if (Flash_Read(ADR_GPIO_AXIS_FREQ_X10, &freq_x10, false)
+                && freq_x10 != 0xFFFF && freq_x10 >= 5 && freq_x10 <= 5000) {
+            axis_proc_set_filter_freq((float)freq_x10 / 10.0f);
         }
     }
 
@@ -835,6 +879,22 @@ extern "C" int ffb_save_flash(void) {
     if (!Flash_Write(ADR_VBUS_DIVIDER, (uint16_t)s_vbus_divider)) s_last_save_errors++;
     s_last_save_writes++;
 
+    // GPIO axis processor (AnalogAxisProcessing port)
+    // Flags bitmap: bit0=filter, bit1=autorange. Freq em décimos de Hz.
+    {
+        extern int   axis_proc_get_filter_enabled(void);
+        extern int   axis_proc_get_autorange_enabled(void);
+        extern float axis_proc_get_filter_freq(void);
+        uint16_t flags = 0;
+        if (axis_proc_get_filter_enabled())    flags |= 0x01;
+        if (axis_proc_get_autorange_enabled()) flags |= 0x02;
+        uint16_t freq_x10 = (uint16_t)(axis_proc_get_filter_freq() * 10.0f);
+        if (!Flash_Write(ADR_GPIO_AXIS_FLAGS,    flags))    s_last_save_errors++;
+        s_last_save_writes++;
+        if (!Flash_Write(ADR_GPIO_AXIS_FREQ_X10, freq_x10)) s_last_save_errors++;
+        s_last_save_writes++;
+    }
+
     if (s_axis_raw) {
         // Escala básica
         uint16_t r  = (uint16_t)(s_axis_raw->rangeDegrees_ < 65535.0f ? s_axis_raw->rangeDegrees_ : 65535.0f);
@@ -1027,7 +1087,7 @@ extern "C" float ffb_get_axis_fxratio(void){ return s_axis_raw ? s_axis_raw->fxR
 extern "C" void  ffb_set_axis_range(float v)  { if (s_axis_raw) s_axis_raw->rangeDegrees_ = v; }
 extern "C" void  ffb_set_axis_maxtq(float v)  {
     if (!s_axis_raw) return;
-    if (v < 0.1f) v = 0.1f; if (v > 20.0f) v = 20.0f;  // hard cap de seguranca
+    if (v < 0.1f) v = 0.1f; if (v > 25.0f) v = 25.0f;  // hard cap de seguranca (25 Nm)
     s_axis_raw->maxTorque_Nm_ = v;
 }
 extern "C" void  ffb_set_axis_fxratio(float v){
@@ -1057,6 +1117,24 @@ extern "C" void ffb_set_axis_expo(int v)        { if (s_axis_raw) s_axis_raw->ex
 extern "C" int  ffb_get_axis_exposcale(void)    { return s_axis_raw ? (int)s_axis_raw->exposcale_    : 100; }
 extern "C" void ffb_set_axis_exposcale(int v)   { if (s_axis_raw) s_axis_raw->exposcale_    = (uint8_t)(v < 1 ? 1 : v > 255 ? 255 : v); }
 extern "C" void ffb_axis_zeroenc(void)          { if (s_axis_raw) s_axis_raw->zeroEncoder(); }
+extern "C" float ffb_get_axis_zeroofs(void)     { return s_axis_raw ? s_axis_raw->zeroOffset_ : 0.0f; }
+extern "C" void  ffb_set_axis_zeroofs(float v)  { if (s_axis_raw) s_axis_raw->zeroOffset_ = v; }
+
+// Contadores de diagnostico do callback do Z do encoder (definidos em
+// encoder.cpp do ODrive, instrumentados pelo nosso patch). Expostos via
+// ASCII pra confirmar se Z esta sendo lido pelo STM32 EXTI:
+//   - axis.zhits?   conta pulsos Z aceitos (nivel HIGH no callback = Z real)
+//   - axis.zglitch? conta IRQs rejeitadas pelo debounce (nivel LOW = glitch
+//                   capacitivo, EMI, ruido). Indicador de problema eletrico.
+// Reset via axis.zhits=0 e axis.zglitch=0 (escreve zerando).
+extern "C" {
+extern volatile uint32_t g_z_hit_count;
+extern volatile uint32_t g_z_glitch_count;
+}
+extern "C" uint32_t ffb_get_z_hits(void)     { return g_z_hit_count; }
+extern "C" void     ffb_set_z_hits(uint32_t v)     { g_z_hit_count = v; }
+extern "C" uint32_t ffb_get_z_glitches(void) { return g_z_glitch_count; }
+extern "C" void     ffb_set_z_glitches(uint32_t v) { g_z_glitch_count = v; }
 
 // Live readouts — mapeados pra metric_t do axis
 extern "C" int   ffb_get_axis_curtorque(void)   { return s_axis_raw ? (int)s_axis_raw->getMetrics()->torque : 0; }

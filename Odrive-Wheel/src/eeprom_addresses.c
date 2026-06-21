@@ -20,4 +20,7 @@ const uint16_t VirtAddVarTab[NB_OF_VAR] = {
     ADR_GPIO6_CFG, ADR_GPIO6_AMIN, ADR_GPIO6_AMAX,
     // Hardware (Phase 4.x)
     ADR_VBUS_DIVIDER,
+    // GPIO axis processor (AnalogAxisProcessing port)
+    ADR_GPIO_AXIS_FLAGS,
+    ADR_GPIO_AXIS_FREQ_X10,
 };

@@ -5,7 +5,8 @@ Custom firmware for ODrive v0.5.6 running on **MKS XDrive Mini** and
 full **HID Force Feedback** support to use the motor as a sim racing wheel.
 
 <p align="center">
-  <img src="docs/screenshots/MKSXdriveMini.png" alt="MKS XDrive Mini board" width="500">
+  <img src="docs/screenshots/MKSXdriveMini.png" alt="MKS XDrive Mini board" width="420">
+  <img src="docs/screenshots/Overlay%20FFT.png" alt="PiP Overlay with live FFT spectrum analyzer" width="420">
 </p>
 
 <table align="center">
@@ -22,7 +23,7 @@ full **HID Force Feedback** support to use the motor as a sim racing wheel.
   <tr>
     <td width="50%">
       <a href="docs/screenshots/07-FFB%20test.png">
-        <img src="docs/screenshots/07-FFB%20test.png" alt="FFB Test — built-in WebHID tester"></a>
+        <img src="docs/screenshots/07-FFB%20test.png" alt="FFB Force Test — built-in WebHID tester"></a>
     </td>
     <td width="50%">
       <a href="docs/screenshots/04-Iracing%20overlay.png">
@@ -58,17 +59,21 @@ Based on:
 **Fastest path — in-browser Quick Start wizard:**
 
 Open **<https://eagabriel.github.io/Odrive-Wheel/>** (Chrome/Edge), connect
-the board via Web Serial, and follow the **Quick Start** tab — a 12-step
+the board via Web Serial, and follow the **Quick Start** tab — a 13-step
 guided wizard that walks you from blank firmware all the way to FFB
 responding in-game:
 
 1. Flash firmware (DFU) → 2. Connect → 3. Erase old config → 4. Power
-& protections → 5. Motor config → 6. Encoder config → 7. Motor
-calibration → 8. Encoder offset → 9. Mark pre-calibrated & Save →
-10. FFB config → 11. Test Spring → 12. Done.
+& protections (with **⚡ Set voltage** button — reads real `vbus_voltage`
+and auto-configures over/undervoltage trips + regen ramp) → 5. Motor
+config → 6. Encoder config → 7. Motor calibration → 8. Encoder offset →
+9. Mark pre-calibrated & Save → 10. Configure Z (index pulse) → 11. FFB
+config → 12. Test Spring → 13. Done.
 
 Each step shows the suggested values, links to the relevant config tab,
-and decodes errors inline. PT/EN i18n.
+and decodes errors inline. PT/EN i18n. A separate
+**[docs/TUNING_FEELING.md](docs/TUNING_FEELING.md)** (PT/EN) covers
+post-setup tuning of the FFB chain.
 
 **Want the long-form reference instead?** Read
 **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)** for:
@@ -128,23 +133,33 @@ why PID gains (`pos_gain`, `vel_gain`, etc.) are inert in TORQUE mode.
 > You can also clone the repo and open the file locally if you prefer.
 
 Tabs:
-- **🚀 Quick Start** — 12-step guided setup wizard (firmware flash → motor cal → FFB test) with suggested values, inline error decoding, and tab cross-links
-- **PSU/RBrake** / **Axis 0** / **Motor** / **Encoder** / **Controller** — params via ODrive ASCII
+- **🚀 Quick Start** — 13-step guided setup wizard (firmware flash → motor cal → Z config → FFB test) with suggested values, inline error decoding, and tab cross-links
+- **PSU/RBrake** / **Startup Seq.** / **Motor** / **Encoder** / **Controller** — params via ODrive ASCII
   - Controller tab has a **TORQUE-mode warning banner** flagging which PID-related fields (`pos_gain`, `vel_gain`, `vel_integrator_*`, `inertia`, gain scheduling, etc.) become inert when `control_mode = TORQUE` (default for FFB)
-  - One-click **Anticogging Calibration** button: sets `control_mode = POSITION`, triggers the cal, polls progress (index 0→3600), then auto-marks `pre_calibrated` and restores `control_mode = TORQUE`
-  - **Zero wheel position** action on the Encoder tab + AS5047 preset for SPI absolute encoders
-- **Inputs** — GPIO 1-4 mapped as joystick buttons or analog axes (Complementary-filter smoothing, range/invert per input)
+  - **Auto-tune Velocity PI** (experimental) — IMC-based pole-zero cancel + adversarial Kp/Ki sweep + step response safety. Runs once, saves, used as foundation for anti-cogging
+  - One-click **Anticogging Calibration** button (native): sets `control_mode = POSITION`, triggers the cal, polls progress (index 0→3600), then auto-marks `pre_calibrated` and restores `control_mode = TORQUE`
+  - **📍 Capture mechanical center** action on the Encoder tab (replaces the old numeric `index_offset` slider) — persists to flash + auto-reboot; AS5047 preset for SPI absolute encoders; **Zero Wheel via GPIO** (mode 3 on any GPIO 1–4/6) with persistent center offset across reboots
+- **Inputs** — GPIO 1–4 mapped as joystick buttons or analog axes (low-pass **axis processor** + AMIN/AMAX calibration, dual live bar showing raw + filtered), GPIO 6 as digital button, plus **Thermistor** mode shortcut
 - **FFB Wheel** — range, maxtorque, fxratio, axis effects (idlespring, damper, inertia, friction, **electronic end-stop with separate spring `esgain` + damper `esdamp`**, slew, expo)
 - **FFB Effects** — master gain + per-effect gains
-- **FFB Filters** — biquad lowpass cutoff + Q per effect type
-- **FFB Live** — live dashboard (FFB state, HID counters, active effects, bus current peaks, torque/position chart)
-- **FFB Test** — built-in WebHID effect tester (Spring/Constant/Damper/etc.) without needing a game
-- **Performance Test** — measures real wheel performance under HID FFB drive: **peak RPM**, **maximum angular acceleration** (2nd derivative of HID position with median+MA filter pipeline, calibrated against RFR Wheel), **friction breakaway** torque, **motor + wheel inertia (J)**, motor saturation detection (Iq sampling), end-stop reach time. Position captured at ~1 kHz via HID input reports during a 6-phase controlled launch (centering → friction probe → push-to-limit → stabilize → LAUNCH → return). Results exportable as CSV. Must be run with the physical wheel attached — measures the real combined assembly.
-- **Overlay (iRacing)** — always-on-top Document Picture-in-Picture window (compact dark theme) with live charts for DC bus (vbus / ibus / Iq / I-brake) and wheel dynamics (torque + position). Includes **brake resistor average dissipated power** calculated as `P = R · ⟨I²⟩` over a rolling 60 s window. When the power calculation is enabled, the overlay enters an **exclusive high-rate mode** (25 ms poll of brake current only) to avoid CDC dessync; otherwise the regular multi-signal poll runs no faster than 50 ms.
+- **FFB Filters** — biquad lowpass cutoff + Q per effect type, with live **frequency response chart** and overlay of measured Bode points from the Frequency Sweep test
+- **FFB Live** — live dashboard (FFB state, HID counters, **Active effects panel** showing up to 3 slots with `type` / `state` / `magnitude` / `gain` — useful to diagnose which effects a game actually sends — plus magnitude dynamics analysis, bus current peaks, torque/position chart)
+- **FFB Force Test** — built-in WebHID effect tester (Spring/Constant/Damper/etc.) without needing a game (auto-connects HID)
+- **Performance Test** — full motor characterization suite, all driven by the **1 kHz HID telemetry stream**:
+  - **Launch test** — peak RPM, peak angular acceleration, friction breakaway, **robust J via median of `Iq×tc/α`** in the 30–80% stable zone (with CV quality indicator), motor saturation detection (`iqSat%`), Iq overlay on charts
+  - **🌀 Coastdown test** — measures viscous friction `b` and time constant `τ` from natural decay
+  - **📊 Frequency Sweep test** — injects a sinusoidal torque at 0.5 / 1 / 2 / 5 / 10 / 20 / 50 / 100 Hz, captures the real wheel position response, and overlays measured Bode points on the FFB Filters chart (uses real measured torque Iq×Kt, not commanded)
+  - **💡 Analysis & suggestions card** — CF/Damper/Friction/Inertia filter cutoffs recommended from the measured J + b + Kt + R + L
+- **Overlay (iRacing)** — always-on-top Document Picture-in-Picture window (compact dark theme), now **fully driven by the 1 kHz HID stream** (no more serial polling — won't fight the game for the CDC channel). Three independent panels:
+  - **DC Bus** — vbus / ibus / Iq / I_brake live chart
+  - **Wheel** — torque + position live chart
+  - **Spectrum (FFT)** — continuous FFT during gameplay with two modes: `τ_cmd vs Iq` (sees the game request vs. the motor output) and `Iq/τ_cmd` Bode (the chain transfer function extracted from real gameplay, no synthetic sweep needed); educational vertical markers at `f_c_mec`, `f_LR`, current CF cutoff
+  - **Numeric indicators**: **P brake (W)** = `R · ⟨I²⟩` rolling 60 s, **P motor (W)** = mechanical (signed) + copper losses, **Clip OUT (%)** = % of time with `|Iq| ≥ 0.95 × current_lim` over a 30 s rolling window, with color tiers (🟢 < 1%, 🟡 1–5%, 🟠 5–10%, 🔴 > 10%)
+- **🔬 Anti-cogging via host** (experimental) — bidirectional capture (fwd + rev turns, configurable) cancels friction bias; export current device map (📥) or import any external JSON map (📂) to apply to flash
 - **Debug / Status** — device info, state machine actions, decoded errors, live monitor, vbus/ibus/Iq/Ibrake chart
 - **Console** — serial TX/RX log
-- **DFU Flash** — re-flash the firmware from the browser (no `dfu-util` needed)
-- **Save/Load Profile** — export/import full board config as JSON for sharing motor presets
+- **DFU Flash** — re-flash the firmware from the browser (no `dfu-util` needed); **🌐 Fetch latest from GitHub** button pulls the latest release `.bin` directly
+- **Save/Load Profile** — Import config / Export config as JSON for sharing motor presets
 
 Each configurable field has a **tooltip explaining its function** on hover, and the UI supports **PT/EN** with a header toggle.
 
@@ -350,21 +365,28 @@ makes a real difference.
 ✅ FFB validated: Spring / Constant / Friction / Periodic responding in ForceTest
 ✅ Brake resistor + regen stable (no PSU resets)
 ✅ Separated FFB / ODrive persistence
-✅ Full HTML config tool in PT/EN with **12-step Quick Start wizard**
-✅ One-click **Anticogging Calibration** via custom `axis.anticogcal!` command
-✅ **GPIO 1-4** as joystick buttons or analog axes
-✅ **Inputs tab** with GPIO config + live preview
+✅ Full HTML config tool in PT/EN with **13-step Quick Start wizard** (Vbus auto-tune of protections + dedicated Z config step + mechanical center capture)
+✅ **1 kHz HID telemetry stream** — `vel_estimate`, `Iq_measured`, `torque_output`, `vbus`, `ibus`, `I_brake` embedded in the HID input report at native 1 kHz, available during gameplay without conflicting with the game
+✅ **Live FFT (Spectrum Analyzer)** — continuous FFT panel in the PiP overlay with `τ_cmd vs Iq` and Bode modes (`Iq/τ_cmd`), educational pole markers
+✅ **Auto-tune Velocity PI** (experimental) — IMC pole-zero cancel + 3-phase Kp/Ki search + step response safety
+✅ **Anti-cogging via host** (experimental) — bidirectional capture cancels friction bias, JSON import/export for map sharing
+✅ One-click native **Anticogging Calibration** via custom `axis.anticogcal!` command
+✅ **GPIO 1–4** as joystick buttons / analog axes / **Zero Wheel** mode
+✅ **Persistent center offset** in flash (2 EE slots float32) — survives reboots
+✅ **Axis processor** for analog inputs — configurable low-pass + AMIN/AMAX calibration with dual live bar (raw + filtered)
 ✅ Controller tab **TORQUE-mode warning** flagging inert fields
-✅ In-browser DFU flasher (WebUSB + DfuSe), FFB EEPROM preserved across reflash
-✅ **iRacing overlay** (Document Picture-in-Picture) + **brake resistor dissipated power** (P = R·⟨I²⟩, exclusive 25 ms mode)
-✅ **Performance Test** — peak RPM, peak angular acceleration, friction breakaway, inertia J, motor saturation
+✅ In-browser DFU flasher (WebUSB + DfuSe), FFB EEPROM preserved across reflash, **🌐 Fetch latest from GitHub** button
+✅ **iRacing overlay** (Document Picture-in-Picture) — fully HID-driven at 1 kHz, panels for DC Bus / Wheel / Spectrum, numeric indicators (**P brake**, **P motor mech + copper**, **Clip OUT %** with color tiers)
+✅ **Performance Test** — peak RPM, peak angular acceleration, friction breakaway, **robust J via median (with CV quality)**, motor saturation, **Coastdown** (b/τ), **Frequency Sweep** (real measured Bode of the FFB chain), filter recommendation cards
+✅ **Charts with zero forced at center** for bidirectional signals across all tool charts
 ✅ **Electronic end-stop** with separate spring (`axis.esgain`) and damper (`axis.esdamp`) — prevents end-of-range bounce
 ✅ **Current control deadband** (`motor.config.current_control_deadband`) — kills idle vibration from PI chasing ADC/encoder noise
-✅ **Robust JSON import** — handles readonly paths, allows re-importing the same file, progress toast for long applies
-✅ **Motor NTC thermistor support** with NTC coefficient calculator (Steinhart + LSQ poly fit), 3.3V/5V pull-up options, wiring diagram in UI
+✅ **Robust JSON config import/export** — handles readonly paths, progress toast for long applies
+✅ **Motor NTC thermistor support** with NTC coefficient calculator (Steinhart + LSQ poly fit, 3 math bugs fixed), 3.3V/5V pull-up options, wiring diagram in UI
 ✅ **Max torque helper** in FFB Wheel tab — real-time check of `axis.maxtorque` vs `current_lim × torque_constant`
 ✅ **GPIO 6 as button input** (PB2, digital only)
 ✅ **Calibrated fields read-only** — prevents accidentally breaking calibration via UI edits
+✅ **TUNING_FEELING.md tutorial** (PT/EN) — post-setup guide for the FFB chain
 ✅ **CI builds** via GitHub Actions — `.bin` artifact on every push
 ✅ End-to-end validation in **iRacing**
 
@@ -383,3 +405,5 @@ Built iteratively, in phases:
 - **Phase 7** — **Performance Test tab** (peak RPM, peak angular acceleration via 2nd-derivative of HID-captured position at ~1 kHz, friction breakaway, motor + wheel inertia J, motor saturation detection; filter pipeline calibrated against RFR Wheel), **brake resistor power dissipation** in the overlay (P = R·⟨I²⟩ over rolling 60 s window with exclusive 25 ms poll mode to avoid CDC dessync), **electronic end-stop split into spring + damper** (`axis.esgain` and `axis.esdamp` — fixes end-of-range bounce), sidebar search, embedded logo, console picker, schema label/path decoupling, PSU/RBrake sidebar rename
 - **Phase 8** — **Current control deadband** (`motor.config.current_control_deadband`) on the FOC PI error eliminates idle vibration from the loop chasing ADC/encoder quantization noise (default 100 mA, tuned for the MKS XDrive Mini), Quick Start UX fixes (encoder cal description "~1 turn" instead of "~10 turns" + auto-disable of velocity limits on initial setup to prevent ERROR_OVERSPEED), **JSON import robustness** (writeProp absorbs ODrive error replies to fix FIFO dessync, readonly paths skipped on export/import, file input value reset to fix the "second import does nothing" bug), **progress toast** with progress bar for long bulk operations
 - **Phase 9** — **Full motor NTC thermistor support** (offboard, with current derating): schema fields in Motor tab + visual wiring diagram banner + coefficient calculator (Steinhart model + LSQ polynomial fit) + 4th "Thermistor" mode in Inputs tab as a shortcut, **Max torque helper** on FFB Wheel tab (real-time `current_lim × torque_constant` validation with green/red status), **GPIO 6 as button input** (PB2 digital-only) with smart UI restriction, **calibrated fields read-only** (`phase_resistance`/`phase_inductance`/`encoder.direction`/`phase_offset`/`phase_offset_float`) prevents accidentally breaking calibration, **Quick Start center wheel warning** before encoder cal, spinout detection thresholds raised (`10W → 50W`) for sim racing tolerance, **gpio_inputs DISABLED preserves ODrive ANALOG_IN config** (fixes thermistor reading garbage from digital input buffer)
+- **Phase 10** (rc11) — **Zero Wheel via GPIO** (new mode 3 on `gpio_inputs`, edge-triggered `ffb_axis_zeroenc()`), **persistent center offset** in flash (2 EE slots of float32), **zero-centered charts** for bidirectional signals across all 5 tool charts, **DFU "Fetch latest from GitHub"** pulling `.bin` directly from the latest release, **explanation banner** at the top of the Encoder tab clarifying electrical offset cal vs. mechanical center vs. idleSpring, **warning for incremental encoder without Z**, **NTC calculator math bugs fixed** (inverted divider, normalization, polyfit coefficient ordering)
+- **Phase 11** (rc12) — **1 kHz HID telemetry** (`vel`/`Iq`/`torque`/`vbus`/`ibus`/`I_brake` embedded in the HID input report, 90-byte descriptor), **PiP overlay fully refactored** to be HID-driven (no more serial polling / exclusive mode), **Live FFT** Spectrum Analyzer panel (`τ_cmd vs Iq` + Bode modes), **Clip OUT %** indicator with color tiers, **P motor (W)** indicator (mech + copper), **Coastdown** and **Frequency Sweep** tests in Performance Test driven by HID 1 kHz, **robust J** via median (with CV quality) replacing the noisy `τ/α` formula, **filter recommendation cards** (CF/Damper/Friction/Inertia from measured J + b + Kt + R + L), **Auto-tune Velocity PI** (IMC + 3-phase Kp/Ki search + step response safety) as foundation for **Anti-cogging via host** (bidirectional capture cancelling friction bias, JSON import/export), **Quick Start ⚡ Set voltage** button auto-tuning protection params from real `vbus_voltage`, dedicated **Step 10 "Configure Z (index pulse)"** wizard, **📍 Capture mechanical center** button replacing the numeric `index_offset` slider, **Active effects panel** in FFB Live for diagnosing what the game actually sends, **Axis processor** for analog inputs (low-pass filter + AMIN/AMAX cal with dual live bar), **TUNING_FEELING.md tutorial** (PT/EN) for post-setup tuning

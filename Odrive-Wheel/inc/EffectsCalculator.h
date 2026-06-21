@@ -69,7 +69,7 @@ struct effect_scaler_t {
 };
 
 struct effect_biquad_t {
-	biquad_constant_t constant	= { 500, 70 };
+	biquad_constant_t constant	= { 200, 70 };
 	biquad_constant_t friction 	= { 50, 20 };
 	biquad_constant_t damper 	= { 30, 40 };
 	biquad_constant_t inertia	= { 15, 20 };

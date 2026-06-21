@@ -37,6 +37,12 @@
 #define HIDDESC_32B_ENTRY_SIZE 16 // 16 bytes more for range definition
 
 
+// Layout do report 0x01 mantido idêntico (24 bytes payload):
+//   buttons | X | Y | Z | Rx | Ry | Rz | Dial | Slider
+// Mas Y, Z, Dial ficam sob USAGE_PAGE Vendor (0xFF00) pra que SOs/jogos NÃO
+// enumerem como joystick axis. Games iteram só Generic Desktop usages.
+// → X, Rx, Ry, Rz, Slider aparecem como axes em jogos. Y, Z, Dial ficam
+//   invisíveis pra calibração (são usados pra telemetria interna 1 kHz).
 #define HIDDESC_GAMEPAD_16B \
 		    0xa1, 0x00,                    /*   COLLECTION (Physical)*/\
 		    0x85, 0x01,                    /*     REPORT_ID (1)*/\
@@ -48,22 +54,47 @@
 		    0x95, 0x40,                    /*     REPORT_COUNT (64)*/\
 		    0x75, 0x01,                    /*     REPORT_SIZE (1)*/\
 		    0x81, 0x02,                    /*     INPUT (Data,Var,Abs)*/\
-		    0x05, 0x01,                    /*     USAGE_PAGE (Generic Desktop)*/\
-		    0x09, HID_USAGE_DESKTOP_X,             /*     USAGE (X)*/\
-		    0x09, HID_USAGE_DESKTOP_Y,             /*     USAGE (Y)*/\
-		    0x09, HID_USAGE_DESKTOP_Z,             /*     USAGE (Z)*/\
-		    0x09, HID_USAGE_DESKTOP_RX,            /*     USAGE (Rx)*/\
-		    0x09, HID_USAGE_DESKTOP_RY,            /*     USAGE (Ry)*/\
-			0x09, HID_USAGE_DESKTOP_RZ,            /*     USAGE (Rz)*/\
-			0x09, HID_USAGE_DESKTOP_DIAL,           /*     USAGE (Dial)*/\
-			0x09, HID_USAGE_DESKTOP_SLIDER,           /*     USAGE (Slider)*/\
+		    /* int16 axes common: logical min/max, report size */\
 		    0x16, 0x01, 0x80,              /*     LOGICAL_MINIMUM (-32767)*/\
 		    0x26, 0xff, 0x7f,              /*     LOGICAL_MAXIMUM (32767)*/\
 		    0x75, 0x10,                    /*     REPORT_SIZE (16)*/\
-		    0x95, 0x08,                    /*     REPORT_COUNT (8)*/\
+		    /* X: wheel position (Generic Desktop, visível pros jogos) */\
+		    0x05, 0x01,                    /*     USAGE_PAGE (Generic Desktop)*/\
+		    0x09, HID_USAGE_DESKTOP_X,     /*     USAGE (X)*/\
+		    0x95, 0x01,                    /*     REPORT_COUNT (1)*/\
+		    0x81, 0x02,                    /*     INPUT (Data,Var,Abs)*/\
+		    /* Y, Z: vendor telemetria (vel, iq) — invisíveis pros jogos */\
+		    0x06, 0x00, 0xFF,              /*     USAGE_PAGE (Vendor 0xFF00)*/\
+		    0x09, 0x11,                    /*     USAGE (vel_estimate)*/\
+		    0x09, 0x12,                    /*     USAGE (iq_measured)*/\
+		    0x95, 0x02,                    /*     REPORT_COUNT (2)*/\
+		    0x81, 0x02,                    /*     INPUT (Data,Var,Abs)*/\
+		    /* Rx, Ry, Rz: GPIO axes (Generic Desktop) */\
+		    0x05, 0x01,                    /*     USAGE_PAGE (Generic Desktop)*/\
+		    0x09, HID_USAGE_DESKTOP_RX,    /*     USAGE (Rx)*/\
+		    0x09, HID_USAGE_DESKTOP_RY,    /*     USAGE (Ry)*/\
+		    0x09, HID_USAGE_DESKTOP_RZ,    /*     USAGE (Rz)*/\
+		    0x95, 0x03,                    /*     REPORT_COUNT (3)*/\
+		    0x81, 0x02,                    /*     INPUT (Data,Var,Abs)*/\
+		    /* Dial: vendor telemetria (torque) — invisível pros jogos */\
+		    0x06, 0x00, 0xFF,              /*     USAGE_PAGE (Vendor 0xFF00)*/\
+		    0x09, 0x13,                    /*     USAGE (torque_output)*/\
+		    0x95, 0x01,                    /*     REPORT_COUNT (1)*/\
+		    0x81, 0x02,                    /*     INPUT (Data,Var,Abs)*/\
+		    /* Slider: GPIO axis (Generic Desktop) */\
+		    0x05, 0x01,                    /*     USAGE_PAGE (Generic Desktop)*/\
+		    0x09, HID_USAGE_DESKTOP_SLIDER,/*     USAGE (Slider)*/\
+		    0x95, 0x01,                    /*     REPORT_COUNT (1)*/\
+		    0x81, 0x02,                    /*     INPUT (Data,Var,Abs)*/\
+		    /* VBus, IBus, IBrake: vendor telemetria (×100) — invisíveis pros jogos */\
+		    0x06, 0x00, 0xFF,              /*     USAGE_PAGE (Vendor 0xFF00)*/\
+		    0x09, 0x14,                    /*     USAGE (vbus)*/\
+		    0x09, 0x15,                    /*     USAGE (ibus)*/\
+		    0x09, 0x16,                    /*     USAGE (brake_resistor_current)*/\
+		    0x95, 0x03,                    /*     REPORT_COUNT (3)*/\
 		    0x81, 0x02,                    /*     INPUT (Data,Var,Abs)*/\
 		    0xc0
-#define HIDDESC_GAMEPAD_16B_SIZE 51
+#define HIDDESC_GAMEPAD_16B_SIZE 90
 
 // Define workaround because we can't have conditionals in macros
 #if MAX_AXIS == 1

@@ -35,6 +35,48 @@ extern "C" float odrive_bridge_get_vbus(void)        { return odrv.vbus_voltage_
 extern "C" float odrive_bridge_get_motor_ibus(void)  { return axes[0].motor_.I_bus_; }
 extern "C" int   odrive_bridge_motor_is_armed(void)  { return axes[0].motor_.is_armed_ ? 1 : 0; }
 
+// Telemetria 1 kHz pro HID input report (axes não usados Y, Z, Dial).
+// vel_estimate em turns/s (PLL filtrado), Iq_measured em Ampères,
+// torque_output em Nm. Tudo em float, escala aplicada no caller pra int16.
+// vel/Iq usam .present().value_or(0) porque são OutputPort<float> (podem
+// não ter valor se ainda nem rodou um ciclo do controller — raro mas
+// possível durante boot).
+extern "C" float odrive_bridge_get_vel_estimate(void) {
+    return axes[0].encoder_.vel_estimate_.any().value_or(0.0f);
+}
+extern "C" float odrive_bridge_get_iq_measured(void) {
+    return axes[0].motor_.current_control_.Iq_measured_;
+}
+extern "C" float odrive_bridge_get_torque_output(void) {
+    return axes[0].controller_.torque_output_.any().value_or(0.0f);
+}
+extern "C" float odrive_bridge_get_brake_resistor_current(void) {
+    return odrv.brake_resistor_current_;
+}
+
+// Snapshot dos contadores de SPI do encoder + último raw recebido.
+extern "C" void odrive_bridge_enc_get_raw(struct encraw_snap_t *snap) {
+    auto& e = axes[0].encoder_;
+    snap->ok_count    = e.abs_spi_ok_count_;
+    snap->fail_parity = e.abs_spi_fail_parity_;
+    snap->fail_ef     = e.abs_spi_fail_ef_;
+    snap->fail_xfer   = e.abs_spi_fail_xfer_;
+    snap->last_rx     = e.abs_spi_last_rx_;
+    snap->pos_abs     = e.pos_abs_;
+}
+
+extern "C" void odrive_bridge_enc_get_magnet(struct magnet_snap_t *snap) {
+    auto& e = axes[0].encoder_;
+    uint16_t raw       = e.diaagc_raw_;
+    snap->raw          = raw;
+    snap->update_count = e.diaagc_update_count_;
+    snap->agc          = raw & 0xFF;
+    snap->lf           = (raw >> 8) & 1;
+    snap->cof          = (raw >> 9) & 1;
+    snap->magh         = (raw >> 10) & 1;
+    snap->magl         = (raw >> 11) & 1;
+}
+
 // Anticogging calibration trigger — equivalente a chamar a função RPC
 // `start_anticogging_calibration()` via Fibre. Necessário porque o campo
 // `axis0.controller.config.anticogging.calib_anticogging` é marcado como

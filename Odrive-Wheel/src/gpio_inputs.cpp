@@ -16,6 +16,11 @@ extern "C" float get_adc_relative_voltage_ch(uint16_t channel);
 // Captura zeroOffset_ em RAM (NÃO persiste; user salva manualmente).
 extern "C" void ffb_axis_zeroenc(void);
 
+// Axis processor (Biquad filter + autorange + min/max manual). Roteia
+// reads de GPIOs em modo AXIS pelo processor quando filter ou autorange
+// esta habilitado (config global, valida pra todos os 4 canais).
+#include "gpio_axis_proc.h"
+
 extern "C" {
 #include "eeprom.h"
 }
@@ -64,6 +69,11 @@ struct gpio_cfg_t {
 };
 
 static gpio_cfg_t s_cfg[GPIO_INPUTS_COUNT];
+
+// Cache do último valor filtrado por GPIO (modo AXIS). Atualizado no update
+// loop quando o axis processor processa. Usado por gpio.N.filt? pra UI.
+// 0xFFFF = nunca foi atualizado (GPIO não está em modo AXIS).
+static uint16_t s_last_filtered[GPIO_INPUTS_COUNT] = { 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF };
 
 // -------------------- Endereços EE por GPIO (helpers) --------------------
 // Mesma ordem do s_pins / inst_to_idx0: GPIO 1, 2, 3, 4, 6.
@@ -202,7 +212,9 @@ extern "C" void gpio_inputs_update_report(uint64_t *buttons,
     static bool s_zerowheel_was_high[GPIO_INPUTS_COUNT] = { true, true, true, true, true };
 
     for (int i = 0; i < GPIO_INPUTS_COUNT; i++) {
-        const gpio_cfg_t &c = s_cfg[i];
+        // c eh REFERENCIA mutavel pra permitir autocal escrever em amin/amax
+        // diretamente. Antes era const&; o autocal precisa atualizar o estado.
+        gpio_cfg_t &c = s_cfg[i];
         if (c.mode == GPIO_INPUT_BUTTON) {
             // Botão pra GND com pull-up: pressionado = nível 0.
             // Se invert=1, lógica inversa (active high).
@@ -234,7 +246,24 @@ extern "C" void gpio_inputs_update_report(uint64_t *buttons,
             if (rel < 0) rel = 0;
             if (rel > 1) rel = 1;
             uint16_t raw = (uint16_t)(rel * 4095.0f + 0.5f);
-            int16_t v = scale_axis(raw, c.amin, c.amax, c.invert);
+
+            // Pipeline:
+            //   1. (opcional) Biquad filter — usa c.idx (canal HID 0..3) pra
+            //      indexar o filtro do processor
+            //   2. (opcional) autocal — aprende AMIN/AMAX em runtime
+            //   3. scale_axis pro range HID (-32767..+32767) usando c.amin/c.amax
+            uint16_t filt = axis_proc_filter_raw((uint8_t)c.idx, raw);
+            s_last_filtered[i] = filt;  // cache pra gpio.N.filt?
+
+            // Autocal: atualiza AMIN/AMAX direto em RAM. Quando user
+            // clicar Save, persiste em flash via slots ADR_GPIO*_AMIN/AMAX
+            // ja existentes. Sem duplicacao de estado.
+            if (axis_proc_get_autorange_enabled()) {
+                if (filt < c.amin) c.amin = filt;
+                if (filt > c.amax) c.amax = filt;
+            }
+
+            int16_t v = scale_axis(filt, c.amin, c.amax, c.invert);
 
             switch (c.idx) {
                 case 0: if (RX)     *RX     = v; break;
@@ -314,6 +343,14 @@ extern "C" int gpio_inputs_set_amax(uint8_t inst, uint16_t v) {
     if (i < 0 || v > 4095) return -1;
     s_cfg[i].amax = v;
     return 0;
+}
+
+// Retorna o último valor filtrado (após Biquad do axis processor) pra o
+// GPIO em modo AXIS. Em counts ADC 0..4095, mesmo formato do raw.
+// 0xFFFF se GPIO não está em modo AXIS ou nunca foi processado.
+extern "C" uint16_t gpio_inputs_get_filt(uint8_t inst) {
+    int i = idx0_from_inst(inst);
+    return (i < 0) ? 0xFFFF : s_last_filtered[i];
 }
 
 extern "C" uint16_t gpio_inputs_read_raw(uint8_t inst) {

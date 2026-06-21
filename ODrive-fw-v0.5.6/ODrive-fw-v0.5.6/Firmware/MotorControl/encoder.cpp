@@ -16,6 +16,13 @@ static void enc_index_cb_wrapper(void* ctx) {
     reinterpret_cast<Encoder*>(ctx)->enc_index_cb();
 }
 
+// Contadores de diagnostico do callback do Z — expostos via ASCII pelo
+// nosso firmware (axis.zhits?, axis.zglitch?). Vivem aqui como statics
+// pra serem incrementados dentro do callback sem dependencia de instancia.
+// volatile porque sao escritos por ISR e lidos por main loop.
+volatile uint32_t g_z_hit_count = 0;       // pulsos Z aceitos (HIGH no callback)
+volatile uint32_t g_z_glitch_count = 0;    // IRQs rejeitadas (LOW = glitch capacitivo)
+
 bool Encoder::apply_config(ODriveIntf::MotorIntf::MotorType motor_type) {
     config_.parent = this;
 
@@ -46,6 +53,16 @@ void Encoder::setup() {
         .CLKPolarity = (mode_ == MODE_SPI_ABS_AEAT || mode_ == MODE_SPI_ABS_MA732) ? SPI_POLARITY_HIGH : SPI_POLARITY_LOW,
         .CLKPhase = SPI_PHASE_2EDGE,
         .NSS = SPI_NSS_SOFT,
+        // MKS XDrive Mini: a 2.6 MHz (/16) o MISO chega no STM32 com edges
+        // arredondadas (R-série + C parasita no trace) e amplitude de 2.2V em
+        // vez de 3.3V — bits podem flippar no threshold. /64 = 656 kHz dá
+        // ~1.5 µs por bit, tempo de sobra pra settling. Custo: ~20% CPU no
+        // ISR de 8 kHz (era 5% em /16) — aceitável.
+        // Alinhado com DRV8301 (drv8301.cpp:14) — /16 = 2.625 MHz no SPI3.
+        // Evita re-init do periférico SPI a cada switch entre encoder/DRV
+        // (spi_arbiter compara config completa; se baud difere, faz
+        // HAL_SPI_DeInit + Init que custa CPU e pode gerar glitches no clock).
+        // 6 µs por transação polled — sobra muito tempo no ISR de 8 kHz.
         .BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16,
         .FirstBit = SPI_FIRSTBIT_MSB,
         .TIMode = SPI_TIMODE_DISABLE,
@@ -59,6 +76,36 @@ void Encoder::setup() {
 
     if(mode_ & MODE_FLAG_ABS){
         abs_spi_cs_pin_init();
+
+        // MKS XDrive Mini: AS5047 latcha o bit EF (Error Flag, bit 14 do response)
+        // quando recebe qualquer comando malformado — incluindo o lixo enviado nos
+        // primeiros clocks do boot antes do MOSI estar estável. EF é sticky: só
+        // limpa lendo o registro ERRFL (0x0001). ODrive original nunca lê ERRFL
+        // — só faz read de ANGLECOM em loop — então EF fica preso pra sempre,
+        // e toda leitura subsequente é rejeitada por COM_FAIL mesmo com posição
+        // válida e magneto presente.
+        //
+        // Solução: na boot, mandar 2 transações dummy: a 1ª pede ERRFL (resposta
+        // é lixo), a 2ª pede ANGLECOM (resposta = ERRFL contents, e ato de ler
+        // ERRFL limpa o bit no chip). A partir daí EF deve estar 0 enquanto o
+        // chip está operando normal.
+        if (mode_ == MODE_SPI_ABS_AMS) {
+            uint16_t saved_tx = abs_spi_dma_tx_[0];
+            // Transaction 1: send "read ERRFL" command (0x4001 = R bit + addr 0x0001,
+            // parity bit 0 because addr already has even number of 1s).
+            abs_spi_dma_tx_[0] = 0x4001;
+            spi_arbiter_->transfer(spi_task_.config, abs_spi_cs_gpio_,
+                                   (uint8_t*)abs_spi_dma_tx_,
+                                   (uint8_t*)abs_spi_dma_rx_,
+                                   1, /*timeout_ms=*/5);
+            // Transaction 2: send "read ANGLECOM" command. Response is ERRFL contents
+            // — read clears the error flags in the chip per AS5047 spec.
+            abs_spi_dma_tx_[0] = saved_tx;  // 0xFFFF
+            spi_arbiter_->transfer(spi_task_.config, abs_spi_cs_gpio_,
+                                   (uint8_t*)abs_spi_dma_tx_,
+                                   (uint8_t*)abs_spi_dma_rx_,
+                                   1, /*timeout_ms=*/5);
+        }
 
         if (axis_->controller_.config_.anticogging.pre_calibrated) {
             axis_->controller_.anticogging_valid_ = true;
@@ -86,6 +133,26 @@ bool Encoder::do_checks(){
 // (maybe by attaching the interrupt on start search, synergistic with following)
 void Encoder::enc_index_cb() {
     if (config_.use_index) {
+        // Debounce/glitch rejection — verifica nivel ATUAL do pino antes
+        // de aceitar a IRQ rising como pulso Z real. Glitches capacitivos
+        // do PWM do driver (acoplamento via cabo) podem disparar EXTI
+        // rising falsa, mas o nivel volta a LOW em ~50-100 ns. Pulso Z
+        // real do encoder dura tipicamente >= 1 us. Quando o callback
+        // roda (latencia ~100 ns no F405), pulso real ainda esta HIGH;
+        // glitch ja voltou pra LOW.
+        //
+        // Polaridade assumida: idle=LOW, pulse=HIGH (padrao ABZ
+        // industrial com pull-down). Se o encoder usar idle=HIGH, esse
+        // teste rejeitaria pulsos reais — nesse caso precisa de uma
+        // flag de config invert, mas a maioria de encoders ABZ usa
+        // idle=LOW.
+        if (!index_gpio_.read()) {
+            // glitch — ignora, NAO desinscreve (continua armado)
+            g_z_glitch_count++;
+            return;
+        }
+        g_z_hit_count++;
+
         set_circular_count(0, false);
         if (config_.use_index_offset)
             set_linear_count((int32_t)(config_.index_offset * config_.cpr));
@@ -489,7 +556,20 @@ void Encoder::sample_now() {
             sincos_sample_c_ = get_adc_relative_voltage(get_gpio(config_.sincos_gpio_pin_cos)) - 0.5f;
         } break;
 
-        case MODE_SPI_ABS_AMS:
+        case MODE_SPI_ABS_AMS: {
+            // Interleave a cada 32 transações (250 Hz cycle @ 8 kHz):
+            //   ph=0: send 0x4001 (read ERRFL) → AS5047 limpa o ERRFL ao receber
+            //   ph=1: send 0xFFFC (read DIAAGC); RX é ERRFL data (descarta)
+            //   ph=2: send 0xFFFF (read ANGLECOM); RX é DIAAGC ← captura aqui
+            //   ph=3..31: send 0xFFFF normal; RX é ANGLECOM
+            // Net: ERRFL limpa a 250 Hz (impede EF sticky), DIAAGC capturado a 250 Hz,
+            // pos_abs perde só 2/32 = 6.25% das amostras (ainda imperceptível pro FFB).
+            uint16_t ph = abs_spi_cmd_phase_ % 256;
+            if      (ph == 0) abs_spi_dma_tx_[0] = 0x4001;  // ERRFL read (clears)
+            else if (ph == 1) abs_spi_dma_tx_[0] = 0xFFFC;  // DIAAGC read
+            else              abs_spi_dma_tx_[0] = 0xFFFF;  // ANGLECOM read
+            abs_spi_start_transaction();
+        } break;
         case MODE_SPI_ABS_CUI:
         case MODE_SPI_ABS_AEAT:
         case MODE_SPI_ABS_RLS:
@@ -527,19 +607,17 @@ void Encoder::decode_hall_samples() {
 
 bool Encoder::abs_spi_start_transaction() {
     if (mode_ & MODE_FLAG_ABS){
-        if (Stm32SpiArbiter::acquire_task(&spi_task_)) {
-            spi_task_.ncs_gpio = abs_spi_cs_gpio_;
-            spi_task_.tx_buf = (uint8_t*)abs_spi_dma_tx_;
-            spi_task_.rx_buf = (uint8_t*)abs_spi_dma_rx_;
-            spi_task_.length = 1;
-            spi_task_.on_complete = [](void* ctx, bool success) { ((Encoder*)ctx)->abs_spi_cb(success); };
-            spi_task_.on_complete_ctx = this;
-            spi_task_.next = nullptr;
-            
-            spi_arbiter_->transfer_async(&spi_task_);
-        } else {
-            return false;
-        }
+        // MKS XDrive Mini fix: usa transfer() POLLED em vez de transfer_async(DMA).
+        // Stm32SpiArbiter documenta que DMA async travava nesse hardware (ISR
+        // do DMA não disparava — conflito provavel com USB OTG ou prioridades
+        // IRQ). DRV8301 já foi migrado pra polled; encoder estava esquecido.
+        // length=1 = 1× transação de 16 bits (DataSize=16BIT no spi_task_.config).
+        // Em /16 baud (~2.6 MHz) cada transação leva ~6 µs — barato no ISR de 8 kHz.
+        bool ok = spi_arbiter_->transfer(spi_task_.config, abs_spi_cs_gpio_,
+                                         (uint8_t*)abs_spi_dma_tx_,
+                                         (uint8_t*)abs_spi_dma_rx_,
+                                         1, /*timeout_ms=*/2);
+        abs_spi_cb(ok);
     }
     return true;
 }
@@ -563,17 +641,58 @@ void Encoder::abs_spi_cb(bool success) {
     uint16_t pos;
 
     if (!success) {
+        abs_spi_fail_xfer_++;
         goto done;
     }
+    // MKS XDrive Mini debug: registra último raw recebido pra inspeção via
+    // sys.encraw! (mesmo que a validação falhe abaixo, queremos ver o byte cru).
+    abs_spi_last_rx_ = abs_spi_dma_rx_[0];
 
     switch (mode_) {
         case MODE_SPI_ABS_AMS: {
             uint16_t rawVal = abs_spi_dma_rx_[0];
             // check if parity is correct (even) and error flag clear
-            if (ams_parity(rawVal) || ((rawVal >> 14) & 1)) {
+            if (ams_parity(rawVal)) {
+                abs_spi_fail_parity_++;
+                abs_spi_cmd_phase_++;
+                goto done;
+            }
+            // MKS XDrive Mini: NÃO rejeitar mais por EF=1. Investigação empírica
+            // (com scope mostrando sinal MISO 0→3V3 limpo em /16, /64, /128, com
+            // ou sem pull-up externo) mostrou que EF=1 vinha COM dados de ângulo
+            // perfeitos — parity sempre 0, valores consistentes com magneto.
+            //
+            // EF é flag housekeeping do AS5047: "ERRFL tem algum bit". Em algumas
+            // condições/quirks do chip ela permanece set mesmo após ERRFL read,
+            // especialmente quando enviamos reads não-ANGLECOM (DIAAGC, ERRFL).
+            // PARITY é o juiz da integridade da transação — passou parity,
+            // dado é íntegro. Conta EF separadamente como info, não erro.
+            if ((rawVal >> 14) & 1) {
+                abs_spi_fail_ef_++;  // counter informacional, NÃO descarta dado
+            }
+            // Interleave decoding (offset por 1 tick — AS5047 protocol):
+            //   ph_now=1: resposta ao ERRFL cmd (phase 0) → discard
+            //   ph_now=2: resposta ao DIAAGC cmd (phase 1) → capture
+            //   outros:   resposta a ANGLECOM cmd → use como angle
+            uint16_t ph_now = abs_spi_cmd_phase_ % 256;
+            abs_spi_cmd_phase_++;
+            if (ph_now == 1) {
+                // Resposta é ERRFL data — descarta (importante é o clear no chip)
+                // Marca pos_updated=true: skip intencional, NÃO é erro. Sem isso
+                // o spi_error_rate sobe artificialmente em 0.78% e contribui pro
+                // ERROR_ABS_SPI_COM_FAIL ficar voltando após Clear.
+                abs_spi_pos_updated_ = true;
+                goto done;
+            }
+            if (ph_now == 2) {
+                // Resposta é DIAAGC data — captura
+                diaagc_raw_ = rawVal & 0x3FFF;
+                diaagc_update_count_++;
+                abs_spi_pos_updated_ = true;  // skip intencional
                 goto done;
             }
             pos = rawVal & 0x3fff;
+            abs_spi_ok_count_++;
         } break;
 
         case MODE_SPI_ABS_CUI: {
@@ -743,6 +862,16 @@ bool Encoder::update() {
             } else {
                 // Low pass filter the error
                 spi_error_rate_ += current_meas_period * (0.0f - spi_error_rate_);
+                // MKS XDrive Mini: auto-recovery do ERROR_ABS_SPI_COM_FAIL com
+                // histerese. ODrive vanilla seta o erro mas NUNCA limpa — fica
+                // grudado pra sempre mesmo com SPI saudável depois.
+                // Trigger no upstream em 5%, nosso auto-clear em 1% — boa
+                // margem de segurança. Agora que EF não conta mais como falha
+                // (parity é o único critério real), o rate de equilíbrio deve
+                // ficar bem perto de 0%, então auto-clear em 1% é confortável.
+                if (spi_error_rate_ < 0.01f && (error_ & ERROR_ABS_SPI_COM_FAIL)) {
+                    error_ = (Error)(error_ & ~ERROR_ABS_SPI_COM_FAIL);
+                }
             }
 
             abs_spi_pos_updated_ = false;

@@ -38,10 +38,15 @@ compile_commands.json
 
 # =============================================================================
 # Documentation binaries (large, not redistributed)
+# Exception: PDFs/Word docs explicitly placed in docs/ are intentional
+# hardware references (schematics, datasheets) — track them.
 # =============================================================================
 *.pdf
 *.docx
 *.doc
+!docs/*.pdf
+!docs/*.docx
+!docs/*.doc
 
 # =============================================================================
 # Logs / temp / OS
