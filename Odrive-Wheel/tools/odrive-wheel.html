@@ -1742,7 +1742,7 @@
   <div class="header-actions">
     <!-- Sponsor / BuyMeACoffee links (à esquerda do Connect) -->
     <span class="tool-version" title="HTML tool version"
-          style="font-size:11px;color:var(--muted);font-family:ui-monospace,Consolas,monospace;letter-spacing:0.5px;margin-right:2px">V0.17</span>
+          style="font-size:11px;color:var(--muted);font-family:ui-monospace,Consolas,monospace;letter-spacing:0.5px;margin-right:2px">V0.18</span>
     <a href="https://www.buymeacoffee.com/eduardogabq" target="_blank" rel="noopener"
        title="Buy Me a Coffee" data-i18n-title="btn.bmc_tip"
        style="display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:6px;background:#FFDD00;text-decoration:none;font-size:18px;line-height:1"
@@ -7405,15 +7405,33 @@ function wireSetupTab() {
   // encoder cal, closed loop) — escreve direto no device (sem red/dirty).
   document.getElementById('btn-setup-mark-precal')?.addEventListener('click', async () => {
     if (!writer) { toast(t('toast.connect_first_board'), 'err'); return; }
+
+    // Detecta encoder incremental sem Z — firmware FORÇA
+    // encoder.pre_calibrated=False nesse caso (encoder.cpp check_pre_calibrated),
+    // então pra que o motor arme em closed-loop a cada boot precisamos
+    // religar startup_encoder_offset_calibration (motor gira ~1 volta no
+    // boot pra recalibrar o phase_offset). Pra qualquer outro setup
+    // (absoluto, ou incremental com Z), pre_calibrated cola e os startup_*
+    // cals ficam False.
+    const modeRaw = await readProp('axis0.encoder.config.mode').catch(() => null);
+    const mode    = parseInt(modeRaw || '0', 10);
+    const useIdxStr = (await readProp('axis0.encoder.config.use_index') || '').trim();
+    const useIndex  = useIdxStr === 'True' || useIdxStr === '1';
+    const incrementalNoZ = (mode === 0 && !useIndex);
+    if (incrementalNoZ) {
+      logLine('step9: incremental sem Z detectado — startup_*_calibration = True (cal a cada boot)', 'tx');
+    }
+
     const fields = [
       { path: 'axis0.motor.config.pre_calibrated',         value: true, type: 'bool' },
       { path: 'axis0.encoder.config.pre_calibrated',       value: true, type: 'bool' },
-      // startup_motor_calibration e startup_encoder_offset_calibration ficam
-      // FALSE — motor + encoder já estão pre_calibrated, não precisa
-      // recalibrar a cada boot.
-      { path: 'axis0.config.startup_motor_calibration',           value: false, type: 'bool' },
-      { path: 'axis0.config.startup_encoder_offset_calibration',  value: false, type: 'bool' },
-      { path: 'axis0.config.startup_closed_loop_control',         value: true,  type: 'bool' },
+      // startup_*_calibration: False pro caso normal (motor + encoder já
+      // estão pre_calibrated). True só pra incremental sem Z, onde o
+      // firmware força pre_calibrated=False em runtime e precisa recal a
+      // cada boot pra is_ready_ ficar verdadeiro.
+      { path: 'axis0.config.startup_motor_calibration',           value: incrementalNoZ, type: 'bool' },
+      { path: 'axis0.config.startup_encoder_offset_calibration',  value: incrementalNoZ, type: 'bool' },
+      { path: 'axis0.config.startup_closed_loop_control',         value: true,           type: 'bool' },
       // Desativa limites de velocidade pro primeiro setup — usuários novos
       // batiam em ERROR_OVERSPEED ao girar o volante manualmente.
       // Podem reativar depois na aba Controller quando o conjunto estiver
@@ -7576,15 +7594,11 @@ function wireSetupTab() {
       await sendCmd('sc', false);
       await new Promise(r => setTimeout(r, 200));
 
-      // Divide calib_scan_distance por 4 antes do offset_cal pra reduzir
-      // movimento do volante (mesmo valor é persistido — vai valer também
-      // pro offset_cal automático que vai rodar a cada boot).
-      const csdRaw = await readProp('axis0.encoder.config.calib_scan_distance').catch(() => null);
-      const csd    = parseFloat(csdRaw);
-      if (isFinite(csd) && csd > 0) {
-        await writeProp('axis0.encoder.config.calib_scan_distance', (csd / 4).toFixed(4));
-        logLine(`step10 skip: calib_scan_distance ${csd.toFixed(2)} → ${(csd/4).toFixed(2)} (÷4)`, 'tx');
-      }
+      // NOTA: scan_distance default (~50 rad ≈ 8 turns) é necessário pra que
+      // o check de CPR/pole_pairs do firmware tenha SNR suficiente. Reduzir
+      // aqui dispara ERROR_CPR_POLEPAIRS_MISMATCH em alguns setups, e o
+      // valor reduzido ainda fica persistente em RAM caso o user salve em
+      // seguida — pior ainda em re-runs do Skip que dividiriam de novo.
 
       setSt('setup.step10_calibrating', 'var(--accent)');
       const r = await _setupRunState(7, 30000);
