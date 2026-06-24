@@ -2507,12 +2507,12 @@ const I18N = {
     'setup.hint.requested_current_range':'A — ≥ current_lim + margin',
     'setup.hint.current_control_bandwidth':'rad/s — banda do PI de corrente. 200 = suave/seguro · 1000 = agressivo (servo industrial)',
     // Encoder
-    'setup.hint.enc_mode':               '0 INCREMENTAL · 1 HALL · 257 SPI_ABS_AMS (AS5047) · 258 AEAT · 259 RLS',
-    'setup.hint.enc_cpr':                'ABZ ×4 (datasheet) · AS5047 = 16384 (14 bits)',
+    'setup.hint.enc_mode':               '0 INCREMENTAL · 1 HALL · 257 SPI_ABS_AMS (AS5047) · 258 AEAT · 259 RLS · 261 MT6835 (21b SPI)',
+    'setup.hint.enc_cpr':                'ABZ ×4 (datasheet) · AS5047 = 16384 (14 bits) · MT6835 = 2097152 (21 bits)',
     'setup.hint.enc_direction':          '1 ou -1 — use ENCODER_DIR_FIND (state=10) pra detectar',
     'setup.hint.enc_bandwidth':          'Hz do PLL — ABZ típico 100-500',
     'setup.hint.enc_use_index':          'true só se tem pulso Z (incremental ABZ)',
-    'setup.hint.enc_cs_pin':             'GPIO do CS quando mode é SPI_ABS_* — AS5047 onboard MKS = 7',
+    'setup.hint.enc_cs_pin':             'GPIO do CS quando mode é SPI_ABS_* — AS5047 onboard MKS = 7 · MT6835 no port SPI da ODESC V4.2 = 6',
     'setup.hint.enc_pre_calibrated':     'false até calibrar (passo 8) · true depois (passo 9)',
     // FFB
     'setup.hint.ffb_range':              'graus lock-to-lock — 900 default sim racing',
@@ -3428,12 +3428,12 @@ const I18N = {
     'setup.hint.requested_current_range':'A — ≥ current_lim + margin',
     'setup.hint.current_control_bandwidth':'rad/s — current PI loop bandwidth. 200 = smooth/safe · 1000 = aggressive (industrial servo)',
     // Encoder
-    'setup.hint.enc_mode':               '0 INCREMENTAL · 1 HALL · 257 SPI_ABS_AMS (AS5047) · 258 AEAT · 259 RLS',
-    'setup.hint.enc_cpr':                'ABZ ×4 (datasheet) · AS5047 = 16384 (14 bits)',
+    'setup.hint.enc_mode':               '0 INCREMENTAL · 1 HALL · 257 SPI_ABS_AMS (AS5047) · 258 AEAT · 259 RLS · 261 MT6835 (21b SPI)',
+    'setup.hint.enc_cpr':                'ABZ ×4 (datasheet) · AS5047 = 16384 (14 bits) · MT6835 = 2097152 (21 bits)',
     'setup.hint.enc_direction':          '1 or -1 — use ENCODER_DIR_FIND (state=10) to detect',
     'setup.hint.enc_bandwidth':          'PLL Hz — ABZ typical 100-500',
     'setup.hint.enc_use_index':          'true only if you have a Z pulse (incremental ABZ)',
-    'setup.hint.enc_cs_pin':             'CS GPIO when mode is SPI_ABS_* — AS5047 onboard MKS = 7',
+    'setup.hint.enc_cs_pin':             'CS GPIO when mode is SPI_ABS_* — AS5047 onboard MKS = 7 · MT6835 on ODESC V4.2 SPI port = 6',
     'setup.hint.enc_pre_calibrated':     'false until calibrated (step 8) · true after (step 9)',
     // FFB
     'setup.hint.ffb_range':              'degrees lock-to-lock — 900 default sim racing',
@@ -4310,7 +4310,7 @@ const ENUM_STREAM_PROTO = {
 const ENUM_ENCODER_MODE = {
   0: 'INCREMENTAL', 1: 'HALL', 2: 'SINCOS',
   256: 'SPI_ABS_CUI', 257: 'SPI_ABS_AMS', 258: 'SPI_ABS_AEAT',
-  259: 'SPI_ABS_RLS', 260: 'SPI_ABS_MA732'
+  259: 'SPI_ABS_RLS', 260: 'SPI_ABS_MA732', 261: 'SPI_ABS_MT6835'
 };
 const ENUM_GPIO_MODE = {
   0: 'DIGITAL', 1: 'DIGITAL_PULL_UP', 2: 'DIGITAL_PULL_DOWN',
