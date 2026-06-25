@@ -1,3 +1,9 @@
+- **Modified firmware — MT6835 SPI support added.** 
+This is a modified build of the Odrive-Wheel FFB firmware, extended to support the
+MagnTek **MT6835** 21-bit magnetic encoder in **absolute SPI mode** (in addition to the
+existing ABZ incremental and AS5047 options).
+Encoder configuration can only be done through the web config tool included in this repository (Odrive-Wheel/tools/odrive-wheel.html) or through the PitHouse UI (github.com/aksc857-stack/ow-pithouse).
+
 - **This fork adds a modification** — **Independent axis & FFB inversion** — split the single combined invert into two separate runtime flags: `axis.invert` flips only the HID position reported to the game (steering direction), `axis.ffbinvert` flips only the FFB torque received from the game (force direction). Each persists to EEPROM (`ADR_AXIS1_CONFIG` bit 0 / bit 1) and has its own toggle button in the HTML tool's FFB Wheel tab. Fixes the case where a game pushes force the wrong way but the steering reads correctly (or vice-versa), which the old all-in-one invert couldn't address
 
 # Odrive-Wheel — MKS XDrive Mini / ODESC V4.2 FFB Firmware
