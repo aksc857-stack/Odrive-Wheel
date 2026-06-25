@@ -90,6 +90,18 @@ void Stm32SpiArbiter::transfer_async(SpiTask* task) {
 bool Stm32SpiArbiter::transfer(SPI_InitTypeDef config, Stm32Gpio ncs_gpio, const uint8_t* tx_buf, uint8_t* rx_buf, size_t length, uint32_t timeout_ms) {
     if (!hspi_) return false;
 
+    // Re-entrancy guard. A higher-priority caller (encoder read in sampling_cb)
+    // can preempt a lower-priority transfer (DRV8301 fault check). If it does,
+    // skip rather than touch the peripheral mid-transfer — a re-init over an
+    // in-flight transfer corrupts the SPI and hangs the bus. Critical for
+    // mode-3 encoders (MT6835) whose config differs from the DRV (mode 1),
+    // forcing a DeInit/Init on every switch. A skipped encoder read is harmless
+    // (counts as a COM miss; the PLL interpolates). Strict interrupt priority
+    // guarantees the higher-priority transfer fully completes before the
+    // lower-priority one resumes, so no overlap is possible.
+    if (in_transfer_) return false;
+    in_transfer_ = true;
+
     // Reconfigura SPI se necessario (mesma logica do start() original)
     if (!equals(config, hspi_->Init)) {
         HAL_SPI_DeInit(hspi_);
@@ -114,6 +126,7 @@ bool Stm32SpiArbiter::transfer(SPI_InitTypeDef config, Stm32Gpio ncs_gpio, const
     // Release CS
     ncs_gpio.write(true);
 
+    in_transfer_ = false;
     return st == HAL_OK;
 }
 

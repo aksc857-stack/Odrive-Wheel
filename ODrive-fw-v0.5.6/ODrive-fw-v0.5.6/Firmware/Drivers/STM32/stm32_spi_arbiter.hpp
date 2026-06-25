@@ -89,6 +89,11 @@ private:
     
     SPI_HandleTypeDef* hspi_;
     SpiTask* task_list_ = nullptr;
+    // Re-entrancy guard for the polled transfer(): the encoder SPI read runs in
+    // the high-priority sampling ISR and can preempt a lower-priority transfer
+    // (e.g. DRV8301 fault check) mid-flight. Without this, the preempting read
+    // re-inits the SPI peripheral over an in-flight transfer and hangs the bus.
+    volatile bool in_transfer_ = false;
 };
 
 #endif // __STM32_SPI_ARBITER_HPP
