@@ -1138,7 +1138,13 @@ extern "C" void     ffb_set_z_glitches(uint32_t v) { g_z_glitch_count = v; }
 
 // Live readouts — mapeados pra metric_t do axis
 extern "C" int   ffb_get_axis_curtorque(void)   { return s_axis_raw ? (int)s_axis_raw->getMetrics()->torque : 0; }
-extern "C" float ffb_get_axis_curpos(void)      { return s_axis_raw ? s_axis_raw->getMetrics()->posDegrees : 0.0f; }
+extern "C" float ffb_get_axis_curpos(void)      {
+    // Applique axis.invert comme getScaledAxisPos() (HID) : curpos doit refléter
+    // la position vue par le jeu, sinon le visuel de l'app ne suit pas l'inversion.
+    if (!s_axis_raw) return 0.0f;
+    float deg = s_axis_raw->getMetrics()->posDegrees;
+    return s_axis_raw->axisInverted_ ? -deg : deg;
+}
 extern "C" float ffb_get_axis_curspd(void)      { return s_axis_raw ? s_axis_raw->getMetrics()->speed : 0.0f; }
 extern "C" float ffb_get_axis_curaccel(void)    { return s_axis_raw ? s_axis_raw->getMetrics()->accel : 0.0f; }
 
