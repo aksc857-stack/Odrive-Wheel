@@ -10,6 +10,53 @@ extern "C" void odrive_bridge_init(void) {
     // odrive_main() normal. TIM3 encoder quadrature está ativo. Nada a fazer.
 }
 
+// ===================== Option A — thread de leitura do encoder ===============
+// Objetivo: tirar a leitura SPI do MT6835 do ISR prio-0 (sampling_cb) pra uma
+// thread dedicada, eliminando a fome de USB/FFB. ETAPA 1: só o esqueleto (loop
+// idle). Não mexe na leitura ainda — serve pra confirmar que adicionar a thread
+// não quebra a enumeração USB, antes de migrar a leitura na etapa 2.
+static void enc_spi_thread(void* arg) {
+    (void)arg;
+    Encoder& e = axes[0].encoder_;
+
+    // Tick do FreeRTOS = 1 kHz → osDelay/osDelayUntil têm granularidade de 1 ms.
+    // Pra ler acima de 1 kHz fazemos N leituras por tick, igualmente espaçadas
+    // por busy-wait curto medido no DWT_CYCCNT (contador de ciclos, ~6 ns
+    // @168 MHz). Durante cada espera cedemos a CPU (osThreadYield) pras threads
+    // de mesma prioridade (USB tusb também é Normal) — não bloqueamos o
+    // barramento (o SPI só é tocado nas ~9 µs de cada leitura). O ISR (8 kHz)
+    // consome pos_abs_ em cache; a PLL interpola. NÃO usar busy-wait sem ceder/
+    // dormir: o thread DEVE liberar a CPU pra não estrangular USB/FFB nem segurar
+    // a SPI3 (compartilhada com o DRV8301).
+    const uint32_t reads_per_tick = 8;                          // 8 leituras/ms = 8 kHz (= taxa do loop de controle)
+    const uint32_t slot = (168000000UL / 1000UL) / reads_per_tick;  // 125 µs em ciclos
+
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
+
+    uint32_t tick = osKernelSysTick();
+    for (;;) {
+        if (e.mode_ == Encoder::MODE_SPI_ABS_MT6835) {
+            uint32_t t0 = DWT->CYCCNT;                           // base do tick
+            for (uint32_t i = 0; i < reads_per_tick; ++i) {
+                if (i > 0) {                                     // espaça a leitura i no slot i*125µs
+                    while ((uint32_t)(DWT->CYCCNT - t0) < i * slot) {
+                        osThreadYield();                         // cede a USB/iguais durante a espera
+                    }
+                }
+                e.abs_spi_start_transaction();                  // polled read + abs_spi_cb → pos_abs_
+            }
+        }
+        osDelayUntil(&tick, 1);                                 // próximo tick → N leituras/ms
+    }
+}
+
+extern "C" void odrive_bridge_start_enc_thread(void) {
+    osThreadDef(encSpiThread, enc_spi_thread, osPriorityNormal, 0, 1024 / sizeof(StackType_t));
+    osThreadCreate(osThread(encSpiThread), NULL);
+}
+
 extern "C" float odrive_bridge_get_pos_turns(void) {
     // shadow_count_ é int32 acumulado pelo axis thread (não wrappa em 16-bit
     // como o timer CNT direto). turns = shadow_count / cpr.

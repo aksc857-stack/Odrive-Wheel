@@ -60,11 +60,16 @@ void Encoder::setup() {
         // ~1.5 µs por bit, tempo de sobra pra settling. Custo: ~20% CPU no
         // ISR de 8 kHz (era 5% em /16) — aceitável.
         // Alinhado com DRV8301 (drv8301.cpp:14) — /16 = 2.625 MHz no SPI3.
-        // Evita re-init do periférico SPI a cada switch entre encoder/DRV
-        // (spi_arbiter compara config completa; se baud difere, faz
-        // HAL_SPI_DeInit + Init que custa CPU e pode gerar glitches no clock).
         // 6 µs por transação polled — sobra muito tempo no ISR de 8 kHz.
-        .BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16,
+        // MT6835: lê 3 frames por transação (vs 1 do AS5047), então a /16 ela
+        // bloqueia o ISR de alta prioridade ~3x mais tempo e estrangula o loop
+        // USB/FFB (HID OUT despencava sob carga do FFFSAKE). O MT6835 aceita SCK
+        // até ~16 MHz (datasheet TSCK min 30 ns), então usamos /4 (10.5 MHz) pra
+        // cortar o tempo de transação (~3 frames) ao máximo. /2 (21 MHz) passaria
+        // do limite do chip. Demais encoders ficam em /16, alinhados com o DRV.
+        // Se aparecerem erros de CRC (pty subindo em sys.encraw!), baixar pra
+        // /8 (5.25 MHz) e, se persistir, /16.
+        .BaudRatePrescaler = (mode_ == MODE_SPI_ABS_MT6835) ? SPI_BAUDRATEPRESCALER_4 : SPI_BAUDRATEPRESCALER_16,
         .FirstBit = SPI_FIRSTBIT_MSB,
         .TIMode = SPI_TIMODE_DISABLE,
         .CRCCalculation = SPI_CRCCALCULATION_DISABLE,
@@ -588,10 +593,18 @@ void Encoder::sample_now() {
         case MODE_SPI_ABS_AEAT:
         case MODE_SPI_ABS_RLS:
         case MODE_SPI_ABS_MA732:
-        case MODE_SPI_ABS_MT6835:  // TX já fixado em setup() (0xA003 burst cmd)
         {
             abs_spi_start_transaction();
             // Do nothing
+        } break;
+        case MODE_SPI_ABS_MT6835: {
+            // Option A: a leitura SPI do MT6835 roda na thread dedicada
+            // (enc_spi_thread, odrive_bridge.cpp), FORA deste ISR prio-0, pra não
+            // estrangular o loop USB/FFB. Aqui NÃO tocamos no SPI; marcamos
+            // pos_updated=true pra o update() usar o pos_abs_ em cache (atualizado
+            // pela thread a ~1 kHz) sem contar COM fail. A detecção de falha real
+            // (CRC) fica nos contadores da thread (sys.encraw!). PLL interpola a 8 kHz.
+            abs_spi_pos_updated_ = true;
         } break;
 
         default: {

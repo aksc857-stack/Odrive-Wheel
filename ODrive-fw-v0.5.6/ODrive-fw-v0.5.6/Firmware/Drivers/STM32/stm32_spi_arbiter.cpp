@@ -102,11 +102,24 @@ bool Stm32SpiArbiter::transfer(SPI_InitTypeDef config, Stm32Gpio ncs_gpio, const
     if (in_transfer_) return false;
     in_transfer_ = true;
 
-    // Reconfigura SPI se necessario (mesma logica do start() original)
+    // Reconfiguração LEVE do SPI (só CR1/CR2), NÃO HAL_SPI_DeInit/Init.
+    // O MT6835 (SPI mode 3) e o DRV8301 (mode 1) diferem só na polaridade do
+    // clock, então a config muda a cada switch encoder<->DRV. Um DeInit/Init
+    // completo refaz MspInit (GPIO + clock + DMA) e, chamado a 8 kHz no ISR de
+    // alta prioridade, sufoca a CPU e derruba o loop USB/FFB — o HID OUT caía de
+    // ~670 Hz pra 2-45 Hz, deixando o FFB cíclico/errado. GPIO/clock/DMA já foram
+    // inicializados no boot (MX_SPI3_Init); só precisamos reescrever os registros
+    // de protocolo, exatamente como HAL_SPI_Init faz (stm32f4xx_hal_spi.c:310),
+    // mas sem o MspInit. Custa alguns registradores (<1 µs) em vez de dezenas de µs.
     if (!equals(config, hspi_->Init)) {
-        HAL_SPI_DeInit(hspi_);
+        __HAL_SPI_DISABLE(hspi_);
         hspi_->Init = config;
-        HAL_SPI_Init(hspi_);
+        WRITE_REG(hspi_->Instance->CR1,
+                  (config.Mode | config.Direction | config.DataSize |
+                   config.CLKPolarity | config.CLKPhase | (config.NSS & SPI_CR1_SSM) |
+                   config.BaudRatePrescaler | config.FirstBit | config.CRCCalculation));
+        WRITE_REG(hspi_->Instance->CR2,
+                  (((config.NSS >> 16U) & SPI_CR2_SSOE) | config.TIMode));
         __HAL_SPI_ENABLE(hspi_);
     }
 
