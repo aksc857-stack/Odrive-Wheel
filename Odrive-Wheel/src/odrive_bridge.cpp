@@ -12,48 +12,55 @@ extern "C" void odrive_bridge_init(void) {
 
 // ===================== Option A — thread de leitura do encoder ===============
 // Objetivo: tirar a leitura SPI do MT6835 do ISR prio-0 (sampling_cb) pra uma
-// thread dedicada, eliminando a fome de USB/FFB. ETAPA 1: só o esqueleto (loop
-// idle). Não mexe na leitura ainda — serve pra confirmar que adicionar a thread
-// não quebra a enumeração USB, antes de migrar a leitura na etapa 2.
+// thread dedicada, eliminando a fome de USB/FFB.
+//
+// Sincronização: em vez de busy-wait no DWT (que queimava todo o CPU idle em
+// osThreadYield e deixava a amostra com idade aleatória de 0-125 µs), a thread
+// bloqueia num semáforo binário liberado pelo control loop (8 kHz, IRQ de
+// baixa prioridade — CMSIS permitido lá, ao contrário do sampling_cb prio-0).
+// Encoder::update() consome pos_abs_ e dá o kick; a thread lê logo depois que
+// a IRQ sai. A amostra consumida no ciclo N foi lida logo após o ciclo N-1 →
+// atraso de ~1 período CONSTANTE (puro delay, fácil pra PLL) em vez de jitter.
+// Se a thread atrasar, os kicks saturam em 1 (semáforo binário) e leituras são
+// puladas — inofensivo, a PLL interpola.
+static osSemaphoreId enc_spi_sem = nullptr;
+
 static void enc_spi_thread(void* arg) {
     (void)arg;
     Encoder& e = axes[0].encoder_;
 
-    // Tick do FreeRTOS = 1 kHz → osDelay/osDelayUntil têm granularidade de 1 ms.
-    // Pra ler acima de 1 kHz fazemos N leituras por tick, igualmente espaçadas
-    // por busy-wait curto medido no DWT_CYCCNT (contador de ciclos, ~6 ns
-    // @168 MHz). Durante cada espera cedemos a CPU (osThreadYield) pras threads
-    // de mesma prioridade (USB tusb também é Normal) — não bloqueamos o
-    // barramento (o SPI só é tocado nas ~9 µs de cada leitura). O ISR (8 kHz)
-    // consome pos_abs_ em cache; a PLL interpola. NÃO usar busy-wait sem ceder/
-    // dormir: o thread DEVE liberar a CPU pra não estrangular USB/FFB nem segurar
-    // a SPI3 (compartilhada com o DRV8301).
-    const uint32_t reads_per_tick = 8;                          // 8 leituras/ms = 8 kHz (= taxa do loop de controle)
-    const uint32_t slot = (168000000UL / 1000UL) / reads_per_tick;  // 125 µs em ciclos
-
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-    DWT->CYCCNT = 0;
-    DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
-
-    uint32_t tick = osKernelSysTick();
     for (;;) {
+        // Timeout de 100 ms como guarda: se o control loop parar de kickar
+        // (motor thread travada?), a thread não fica presa pra sempre.
+        if (osSemaphoreWait(enc_spi_sem, 100) != osOK)
+            continue;
+        // Pausa pós Program-EEPROM: datasheet 7.6.6 proíbe QUALQUER operação
+        // SPI por >= 6 s após o comando. sys.mteeprom! arma este tick.
+        if ((int32_t)(osKernelSysTick() - e.mt6835_spi_pause_until_tick_) < 0)
+            continue;
         if (e.mode_ == Encoder::MODE_SPI_ABS_MT6835) {
-            uint32_t t0 = DWT->CYCCNT;                           // base do tick
-            for (uint32_t i = 0; i < reads_per_tick; ++i) {
-                if (i > 0) {                                     // espaça a leitura i no slot i*125µs
-                    while ((uint32_t)(DWT->CYCCNT - t0) < i * slot) {
-                        osThreadYield();                         // cede a USB/iguais durante a espera
-                    }
-                }
-                e.abs_spi_start_transaction();                  // polled read + abs_spi_cb → pos_abs_
-            }
+            e.abs_spi_start_transaction();      // polled read + abs_spi_cb → pos_abs_
         }
-        osDelayUntil(&tick, 1);                                 // próximo tick → N leituras/ms
     }
 }
 
+// Chamado pelo Encoder::update() (contexto: control loop IRQ de baixa
+// prioridade, 8 kHz) quando mode == MT6835. osSemaphoreRelease é ISR-safe
+// (cmsis_os usa xSemaphoreGiveFromISR em handler mode).
+extern "C" void odrive_bridge_enc_spi_kick(void) {
+    if (enc_spi_sem)
+        osSemaphoreRelease(enc_spi_sem);
+}
+
 extern "C" void odrive_bridge_start_enc_thread(void) {
-    osThreadDef(encSpiThread, enc_spi_thread, osPriorityNormal, 0, 1024 / sizeof(StackType_t));
+    osSemaphoreDef(encSpiSem);
+    enc_spi_sem = osSemaphoreCreate(osSemaphore(encSpiSem), 1);
+    osSemaphoreWait(enc_spi_sem, 0);   // começa vazio; 1º kick vem do control loop
+
+    // AboveNormal (USB/tusb é Normal): a leitura dura ~5-9 µs a cada 125 µs
+    // (~6% CPU) — curta demais pra estrangular USB, e a prioridade garante que
+    // ela rode logo após o kick em vez de esperar o round-robin do tick.
+    osThreadDef(encSpiThread, enc_spi_thread, osPriorityAboveNormal, 0, 1024 / sizeof(StackType_t));
     osThreadCreate(osThread(encSpiThread), NULL);
 }
 
@@ -141,4 +148,65 @@ extern "C" int odrive_bridge_start_anticogcal(void) {
     if (axes[0].error_ != Axis::ERROR_NONE) return 0;
     axes[0].controller_.start_anticogging_calibration();
     return 1;
+}
+
+// ===================== MT6835 register access (cmd_table) ====================
+// Wrappers C pros command handlers (sys.mtread/mtwrite/mtzero/mteeprom/
+// mtstatus) — cmd_table.cpp não pode incluir odrive_main.h (colisão de Axis).
+// Todos retornam erro se o encoder não está em MODE_SPI_ABS_MT6835 (261).
+
+extern "C" int odrive_bridge_mt6835_read_reg(int addr) {
+    if (addr < 0 || addr > 0xFFF) return -1;
+    uint8_t val = 0;
+    if (!axes[0].encoder_.mt6835_read_reg((uint16_t)addr, &val)) return -1;
+    return (int)val;
+}
+
+extern "C" int odrive_bridge_mt6835_write_reg(int addr, int val) {
+    if (addr < 0 || addr > 0xFFF || val < 0 || val > 0xFF) return 0;
+    return axes[0].encoder_.mt6835_write_reg((uint16_t)addr, (uint8_t)val) ? 1 : 0;
+}
+
+// Auto-set zero: grava a posição atual em ZERO_POS (volátil). Recusa com motor
+// armado — mudar o zero do encoder debaixo do FOC deslocaria a referência de
+// comutação (phase_offset ficaria inválido).
+extern "C" int odrive_bridge_mt6835_set_zero(void) {
+    if (axes[0].motor_.is_armed_) return 0;
+    return axes[0].encoder_.mt6835_auto_set_zero() ? 1 : 0;
+}
+
+// Program EEPROM: persiste TODO o register map (ZERO_POS, HYST, BW, ABZ...).
+// Recusa com motor armado. Pausa as leituras de ângulo da thread por 6.5 s
+// (datasheet 7.6.6: nenhuma operação SPI por >= 6 s) — pos_abs_ congela nesse
+// intervalo, por isso a guarda de desarme é obrigatória, não cosmética.
+extern "C" int odrive_bridge_mt6835_program_eeprom(void) {
+    auto& e = axes[0].encoder_;
+    if (axes[0].motor_.is_armed_) return 0;
+    // Arma a pausa ANTES do comando: nenhuma leitura pode se intrometer
+    // entre o comando e o fim da janela de programação.
+    e.mt6835_spi_pause_until_tick_ = osKernelSysTick() + 6500;
+    // Deixa uma leitura em curso da thread terminar (transação ~5 µs; 2 ticks
+    // de margem cobrem qualquer preempção).
+    osDelay(2);
+    if (!e.mt6835_program_eeprom()) {
+        e.mt6835_spi_pause_until_tick_ = osKernelSysTick();  // comando falhou — despausa
+        return 0;
+    }
+    return 1;
+}
+
+// Snapshot de diagnóstico pro sys.mtstatus?.
+extern "C" void odrive_bridge_mt6835_get_status(struct mt6835_snap_t *snap) {
+    auto& e = axes[0].encoder_;
+    uint8_t st         = e.mt6835_status_;
+    snap->is_mt6835    = (e.mode_ == Encoder::MODE_SPI_ABS_MT6835) ? 1 : 0;
+    snap->boot_ok      = e.mt6835_boot_comm_ok_ ? 1 : 0;
+    snap->hyst_zeroed  = e.mt6835_hyst_zeroed_ ? 1 : 0;
+    snap->overspeed    = (st >> 0) & 1;
+    snap->weak_field   = (st >> 1) & 1;
+    snap->undervolt    = (st >> 2) & 1;
+    // Status da User Auto-Calibration (datasheet 9.2): reg 0x113[7:6].
+    // 0=sem cal, 1=rodando, 2=falhou, 3=sucesso. -1 = leitura SPI falhou.
+    uint8_t cal_reg = 0;
+    snap->cal_state = e.mt6835_read_reg(0x113, &cal_reg) ? ((cal_reg >> 6) & 0x3) : -1;
 }

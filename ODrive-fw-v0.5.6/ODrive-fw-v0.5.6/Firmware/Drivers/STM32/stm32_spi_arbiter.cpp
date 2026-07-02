@@ -90,17 +90,17 @@ void Stm32SpiArbiter::transfer_async(SpiTask* task) {
 bool Stm32SpiArbiter::transfer(SPI_InitTypeDef config, Stm32Gpio ncs_gpio, const uint8_t* tx_buf, uint8_t* rx_buf, size_t length, uint32_t timeout_ms) {
     if (!hspi_) return false;
 
-    // Re-entrancy guard. A higher-priority caller (encoder read in sampling_cb)
-    // can preempt a lower-priority transfer (DRV8301 fault check). If it does,
-    // skip rather than touch the peripheral mid-transfer — a re-init over an
-    // in-flight transfer corrupts the SPI and hangs the bus. Critical for
-    // mode-3 encoders (MT6835) whose config differs from the DRV (mode 1),
-    // forcing a DeInit/Init on every switch. A skipped encoder read is harmless
-    // (counts as a COM miss; the PLL interpolates). Strict interrupt priority
-    // guarantees the higher-priority transfer fully completes before the
-    // lower-priority one resumes, so no overlap is possible.
-    if (in_transfer_) return false;
-    in_transfer_ = true;
+    // Re-entrancy guard. A higher-priority caller (encoder read in sampling_cb
+    // or the MT6835 encoder thread) can preempt a lower-priority transfer
+    // (DRV8301 fault check). If it does, skip rather than touch the peripheral
+    // mid-transfer — a re-init over an in-flight transfer corrupts the SPI and
+    // hangs the bus. Critical for mode-3 encoders (MT6835) whose config differs
+    // from the DRV (mode 1), forcing a re-config on every switch. A skipped
+    // encoder read is harmless (counts as a COM miss; the PLL interpolates).
+    // Atomic exchange (not test-then-set): with several *threads* sharing this
+    // path (encoder thread + axis thread) a context switch between the check
+    // and the store could let both proceed — same idiom as acquire_task().
+    if (__atomic_exchange_n(&in_transfer_, true, __ATOMIC_ACQUIRE)) return false;
 
     // Reconfiguração LEVE do SPI (só CR1/CR2), NÃO HAL_SPI_DeInit/Init.
     // O MT6835 (SPI mode 3) e o DRV8301 (mode 1) diferem só na polaridade do
@@ -139,7 +139,7 @@ bool Stm32SpiArbiter::transfer(SPI_InitTypeDef config, Stm32Gpio ncs_gpio, const
     // Release CS
     ncs_gpio.write(true);
 
-    in_transfer_ = false;
+    __atomic_store_n(&in_transfer_, false, __ATOMIC_RELEASE);
     return st == HAL_OK;
 }
 
