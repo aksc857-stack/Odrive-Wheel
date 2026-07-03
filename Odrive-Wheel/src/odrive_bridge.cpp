@@ -37,7 +37,11 @@ static void enc_spi_thread(void* arg) {
 
     uint32_t tick = osKernelSysTick();
     for (;;) {
-        if (e.mode_ == Encoder::MODE_SPI_ABS_MT6835) {
+        // Pausa pós Program-EEPROM: datasheet 7.6.6 proíbe QUALQUER operação
+        // SPI por >= 6 s após o comando. sys.mteeprom! arma este tick.
+        bool spi_paused =
+            (int32_t)(osKernelSysTick() - e.mt6835_spi_pause_until_tick_) < 0;
+        if (!spi_paused && e.mode_ == Encoder::MODE_SPI_ABS_MT6835) {
             uint32_t t0 = DWT->CYCCNT;                           // base do tick
             for (uint32_t i = 0; i < reads_per_tick; ++i) {
                 if (i > 0) {                                     // espaça a leitura i no slot i*125µs
@@ -141,4 +145,63 @@ extern "C" int odrive_bridge_start_anticogcal(void) {
     if (axes[0].error_ != Axis::ERROR_NONE) return 0;
     axes[0].controller_.start_anticogging_calibration();
     return 1;
+}
+
+// ===================== MT6835 register access (cmd_table) ====================
+// Wrappers C pros command handlers (sys.mtread/mtwrite/mtzero/mteeprom/
+// mtstatus) — cmd_table.cpp não pode incluir odrive_main.h (colisão de Axis).
+// Todos retornam erro se o encoder não está em MODE_SPI_ABS_MT6835 (261).
+
+extern "C" int odrive_bridge_mt6835_read_reg(int addr) {
+    if (addr < 0 || addr > 0xFFF) return -1;
+    uint8_t val = 0;
+    if (!axes[0].encoder_.mt6835_read_reg((uint16_t)addr, &val)) return -1;
+    return (int)val;
+}
+
+extern "C" int odrive_bridge_mt6835_write_reg(int addr, int val) {
+    if (addr < 0 || addr > 0xFFF || val < 0 || val > 0xFF) return 0;
+    return axes[0].encoder_.mt6835_write_reg((uint16_t)addr, (uint8_t)val) ? 1 : 0;
+}
+
+// Auto-set zero: grava a posição atual em ZERO_POS (volátil). Recusa com motor
+// armado — mudar o zero do encoder debaixo do FOC deslocaria a referência de
+// comutação (phase_offset ficaria inválido).
+extern "C" int odrive_bridge_mt6835_set_zero(void) {
+    if (axes[0].motor_.is_armed_) return 0;
+    return axes[0].encoder_.mt6835_auto_set_zero() ? 1 : 0;
+}
+
+// Program EEPROM: persiste TODO o register map (ZERO_POS, HYST, BW, ABZ...).
+// Recusa com motor armado. Pausa as leituras de ângulo da thread por 6.5 s
+// (datasheet 7.6.6: nenhuma operação SPI por >= 6 s) — pos_abs_ congela nesse
+// intervalo, por isso a guarda de desarme é obrigatória, não cosmética.
+extern "C" int odrive_bridge_mt6835_program_eeprom(void) {
+    auto& e = axes[0].encoder_;
+    if (axes[0].motor_.is_armed_) return 0;
+    // Arma a pausa ANTES do comando: nenhuma leitura pode se intrometer
+    // entre o comando e o fim da janela de programação.
+    e.mt6835_spi_pause_until_tick_ = osKernelSysTick() + 6500;
+    // Deixa uma rajada de leituras em curso da thread terminar (a thread lê
+    // em bursts de 8/ms; 3 ticks de margem cobrem o pior caso + preempção).
+    osDelay(3);
+    if (!e.mt6835_program_eeprom()) {
+        e.mt6835_spi_pause_until_tick_ = osKernelSysTick();  // comando falhou — despausa
+        return 0;
+    }
+    return 1;
+}
+
+// Snapshot de diagnóstico pro sys.mtstatus?.
+extern "C" void odrive_bridge_mt6835_get_status(struct mt6835_snap_t *snap) {
+    auto& e = axes[0].encoder_;
+    uint8_t st         = e.mt6835_status_;
+    snap->is_mt6835    = (e.mode_ == Encoder::MODE_SPI_ABS_MT6835) ? 1 : 0;
+    snap->overspeed    = (st >> 0) & 1;
+    snap->weak_field   = (st >> 1) & 1;
+    snap->undervolt    = (st >> 2) & 1;
+    // Status da User Auto-Calibration (datasheet 9.2): reg 0x113[7:6].
+    // 0=sem cal, 1=rodando, 2=falhou, 3=sucesso. -1 = leitura SPI falhou.
+    uint8_t cal_reg = 0;
+    snap->cal_state = e.mt6835_read_reg(0x113, &cal_reg) ? ((cal_reg >> 6) & 0x3) : -1;
 }

@@ -2,6 +2,7 @@
 #include "odrive_main.h"
 #include <Drivers/STM32/stm32_system.h>
 #include <bitset>
+#include <cmsis_os.h>   // osDelay no retry do mt6835_transfer24
 
 Encoder::Encoder(TIM_HandleTypeDef* timer, Stm32Gpio index_gpio,
                  Stm32Gpio hallA_gpio, Stm32Gpio hallB_gpio, Stm32Gpio hallC_gpio,
@@ -686,6 +687,67 @@ uint8_t mt6835_crc8(uint8_t b0, uint8_t b1, uint8_t b2) {
         }
     }
     return crc;
+}
+
+// ============================ MT6835 register access =========================
+// Transação genérica de 24 bits (datasheet 7.6.3): [cmd C3~C0 | addr A11~A0 |
+// data 8b]. O DataSize do config normal é 16-bit (frames do burst read); aqui
+// trocamos pra 8-bit (3 bytes) só nesta transação — o arbiter reescreve CR1
+// quando a config difere, e volta na próxima leitura de ângulo.
+// Comandos (datasheet tabela 7.6.3): 0x3=read, 0x6=write, 0x5=auto-set-zero,
+// 0xC=program EEPROM. Pros dois últimos o byte de resposta é o ack (0x55 = OK).
+//
+// Retry: o transfer() polled retorna false na hora se o barramento está tomado
+// (guard in_transfer_) — com a thread lendo ângulo a 8 kHz (~6% duty) uma
+// colisão é provável. Retenta com osDelay(1) entre tentativas; chamável só de
+// contexto de thread (command handlers), NUNCA de ISR.
+bool Encoder::mt6835_transfer24(uint8_t cmd, uint16_t addr, uint8_t data_in, uint8_t* data_out) {
+    if (mode_ != MODE_SPI_ABS_MT6835)
+        return false;
+
+    SPI_InitTypeDef config = spi_task_.config;
+    config.DataSize = SPI_DATASIZE_8BIT;
+
+    uint8_t tx[3] = {
+        (uint8_t)((cmd << 4) | ((addr >> 8) & 0x0F)),
+        (uint8_t)(addr & 0xFF),
+        data_in,
+    };
+    uint8_t rx[3] = {0, 0, 0};
+
+    bool ok = false;
+    for (int attempt = 0; attempt < 10 && !ok; ++attempt) {
+        if (attempt > 0)
+            osDelay(1);
+        ok = spi_arbiter_->transfer(config, abs_spi_cs_gpio_, tx, rx, 3, /*timeout_ms=*/5);
+    }
+    if (ok && data_out)
+        *data_out = rx[2];
+    return ok;
+}
+
+bool Encoder::mt6835_read_reg(uint16_t addr, uint8_t* val) {
+    return mt6835_transfer24(0x3, addr, 0x00, val);
+}
+
+bool Encoder::mt6835_write_reg(uint16_t addr, uint8_t val) {
+    return mt6835_transfer24(0x6, addr, val, nullptr);
+}
+
+// Auto Setting Zero-Position (datasheet 7.6.7): grava a posição ATUAL no
+// registro ZERO_POS[11:0] (volátil até um Program EEPROM). Ack 0x55 = sucesso.
+bool Encoder::mt6835_auto_set_zero() {
+    uint8_t ack = 0;
+    return mt6835_transfer24(0x5, 0x000, 0x00, &ack) && ack == 0x55;
+}
+
+// Program EEPROM (datasheet 7.6.6): persiste TODO o register map na EEPROM.
+// Ack 0x55 = comando aceito. ATENÇÃO (datasheet): aguardar >= 6 s antes de
+// desligar o chip, sem nenhuma outra operação SPI. O caller é responsável por
+// garantir motor desarmado e avisar o usuário do delay.
+bool Encoder::mt6835_program_eeprom() {
+    uint8_t ack = 0;
+    return mt6835_transfer24(0xC, 0x000, 0x00, &ack) && ack == 0x55;
 }
 
 void Encoder::abs_spi_cb(bool success) {

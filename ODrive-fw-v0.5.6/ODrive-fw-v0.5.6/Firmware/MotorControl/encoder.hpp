@@ -176,6 +176,20 @@ public:
     // Exposto pra inspeção via sys.encraw! / debug; warnings não bloqueiam o FFB.
     uint8_t  mt6835_status_        = 0;
 
+    // MT6835 — acesso a registro único (trama 24 bits, DataSize 8-bit).
+    // Chamável só de contexto de thread (command handlers) — tem retry com
+    // osDelay. Ver implementação em encoder.cpp.
+    bool mt6835_transfer24(uint8_t cmd, uint16_t addr, uint8_t data_in, uint8_t* data_out);
+    bool mt6835_read_reg(uint16_t addr, uint8_t* val);
+    bool mt6835_write_reg(uint16_t addr, uint8_t val);
+    bool mt6835_auto_set_zero();      // ZERO_POS ← posição atual (volátil)
+    bool mt6835_program_eeprom();     // persiste register map (aguardar 6 s!)
+
+    // Pausa das leituras de ângulo da thread (ticks osKernelSysTick). Usado
+    // pelo program EEPROM: datasheet 7.6.6 proíbe qualquer operação SPI por
+    // >= 6 s após o comando. A thread pula leituras enquanto now < este tick.
+    volatile uint32_t mt6835_spi_pause_until_tick_ = 0;
+
     constexpr float getCoggingRatio(){
         return 1.0f / 3600.0f;
     }
