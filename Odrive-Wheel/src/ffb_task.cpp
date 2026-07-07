@@ -231,14 +231,26 @@ public:
         }
 
         const float dt = 0.001f;
-        float new_speed = (degrees - metrics_.posDegrees) / dt;
-        float new_accel = (new_speed - metrics_.speed) / dt;
+        // Velocidade vem da PLL do encoder (vel_estimate, turns/s → deg/s) em
+        // vez de derivada bruta de shadow_count_. Motivo: a derivada dupla do
+        // count bruto amplificava o ruído do encoder (LSBs do MT6835) em ~10⁶
+        // no accel, obrigando current_control_bandwidth ficar baixo (~100)
+        // só pra mascarar o chiado no motor. Com a PLL como fonte,
+        // encoder.config.bandwidth vira o knob real de ruído/latência dos
+        // efeitos de velocidade (damper/friction/inertia — axis e jogo).
+        float new_speed = odrive_bridge_get_vel_estimate() * 360.0f;
+        // Accel: UMA derivada da velocidade já filtrada pela PLL, mais um
+        // low-pass de 1ª ordem (~100 Hz @ 1 kHz) pra suavizar os degraus
+        // residuais da PLL antes de multiplicar pelos gains de inertia.
+        const float ACCEL_LPF_ALPHA = 0.386f;  // dt/(dt + 1/(2π·100Hz))
+        float raw_accel = (new_speed - metrics_.speed) / dt;
+        accelLpf_ += ACCEL_LPF_ALPHA * (raw_accel - accelLpf_);
 
         metrics_.posDegrees = degrees;
         metrics_.pos_f = pos_f;
         metrics_.pos_scaled_16b = (int32_t)(pos_f * 32767.0f);
         metrics_.speed = new_speed;
-        metrics_.accel = new_accel;
+        metrics_.accel = accelLpf_;
 
         // Aplica pending_torque_ no motor SEMPRE (não condicionado ao FFB do
         // jogo estar ativo). Razão: EffectsCalculator::calculateEffects() chama
@@ -276,6 +288,7 @@ public:
 
 private:
     metric_t metrics_{};
+    float accelLpf_           = 0.0f;    // estado do low-pass do accel (deg/s²)
     float pending_torque_     = 0.0f;
     int32_t axisEffectTorque_ = 0;       // calculado em calculateAxisEffects
     int32_t lastTorque_       = 0;       // pra slew rate limit
