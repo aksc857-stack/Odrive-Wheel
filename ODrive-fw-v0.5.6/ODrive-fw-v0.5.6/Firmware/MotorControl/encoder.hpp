@@ -103,6 +103,11 @@ public:
     float interpolation_ = 0.0f;
     OutputPort<float> phase_ = 0.0f;     // [rad]
     OutputPort<float> phase_vel_ = 0.0f; // [rad/s]
+    // Precisão float vs cpr alto (MT6835 = 2^21): mantissa de 24 bits → dentro
+    // de 1 volta a resolução é 0.125 count (ok), mas pos_estimate_counts_
+    // acumula voltas e degrada além de ±4 turns (0.25 count) / ±8 turns
+    // (0.5 count). Irrelevante pra volante com range limitado (±1.5 turns),
+    // mas NÃO usar esse caminho pra multi-turn longo com cpr 2^21.
     float pos_estimate_counts_ = 0.0f;  // [count]
     float pos_cpr_counts_ = 0.0f;  // [count]
     float delta_pos_cpr_counts_ = 0.0f;  // [count] phase detector result for debug
@@ -177,13 +182,17 @@ public:
     uint8_t  mt6835_status_        = 0;
 
     // MT6835 — acesso a registro único (trama 24 bits, DataSize 8-bit).
-    // Chamável só de contexto de thread (command handlers) — tem retry com
-    // osDelay. Ver implementação em encoder.cpp.
+    // Chamável só de contexto de thread (setup, command handlers) — tem retry
+    // com osDelay. Ver implementação em encoder.cpp.
     bool mt6835_transfer24(uint8_t cmd, uint16_t addr, uint8_t data_in, uint8_t* data_out);
     bool mt6835_read_reg(uint16_t addr, uint8_t* val);
     bool mt6835_write_reg(uint16_t addr, uint8_t val);
     bool mt6835_auto_set_zero();      // ZERO_POS ← posição atual (volátil)
     bool mt6835_program_eeprom();     // persiste register map (aguardar 6 s!)
+
+    // Diag do boot (setup()): comm verificada por CRC + HYST zerado com sucesso.
+    bool mt6835_boot_comm_ok_  = false;
+    bool mt6835_hyst_zeroed_   = false;
 
     // Pausa das leituras de ângulo da thread (ticks osKernelSysTick). Usado
     // pelo program EEPROM: datasheet 7.6.6 proíbe qualquer operação SPI por

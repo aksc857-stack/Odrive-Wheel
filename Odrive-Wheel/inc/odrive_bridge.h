@@ -70,6 +70,8 @@ int  odrive_bridge_mt6835_program_eeprom(void);          // 1 OK — aguardar 6 
 
 struct mt6835_snap_t {
     int is_mt6835;     // 1 = encoder mode é MT6835 (261)
+    int boot_ok;       // 1 = comm verificada por CRC no setup()
+    int hyst_zeroed;   // 1 = HYST=0 aplicado com sucesso no boot
     int overspeed;     // STATUS[0] da última leitura de ângulo válida
     int weak_field;    // STATUS[1] — 1 = campo magnético fraco (magneto longe!)
     int undervolt;     // STATUS[2]

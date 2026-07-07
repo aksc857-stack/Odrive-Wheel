@@ -843,7 +843,7 @@ static int h_sys_encraw(uint8_t, CmdType t, const char*, char *r, size_t s) {
 // sys.mtzero!                → ZERO_POS ← posição atual (recusa motor armado)
 // sys.mteeprom!              → persiste register map na EEPROM (recusa armado;
 //                              pausa leituras de ângulo 6.5 s — datasheet 7.6.6)
-// sys.mtstatus?              → STATUS warnings + estado da auto-cal
+// sys.mtstatus?              → boot check + STATUS warnings + estado da auto-cal
 
 static int h_sys_mtread(uint8_t, CmdType t, const char *v, char *r, size_t s) {
     if (t != CMD_TYPE_SET) return -1;   // "SET" carrega o endereço como valor
@@ -896,8 +896,9 @@ static int h_sys_mtstatus(uint8_t, CmdType t, const char*, char *r, size_t s) {
     odrive_bridge_mt6835_get_status(&snap);
     if (!snap.is_mt6835) { strncpy(r, "N/A (encoder mode != 261)", s); return 0; }
     static const char *cal_names[] = {"none", "running", "failed", "ok"};
-    snprintf(r, s, "overspeed=%d weakfield=%d undervolt=%d cal=%s",
-             snap.overspeed, snap.weak_field, snap.undervolt,
+    snprintf(r, s, "boot=%d hyst0=%d overspeed=%d weakfield=%d undervolt=%d cal=%s",
+             snap.boot_ok, snap.hyst_zeroed, snap.overspeed, snap.weak_field,
+             snap.undervolt,
              (snap.cal_state >= 0 && snap.cal_state <= 3) ? cal_names[snap.cal_state] : "read_fail");
     return 0;
 }
@@ -1042,7 +1043,7 @@ const CmdEntry cmdtable[] = {
     { "sys",   "mtwrite",      h_sys_mtwrite },       // sys.mtwrite=<addr> <val>
     { "sys",   "mtzero",       h_sys_mtzero },        // ZERO_POS ← posição atual
     { "sys",   "mteeprom",     h_sys_mteeprom },      // persiste register map (6s!)
-    { "sys",   "mtstatus",     h_sys_mtstatus },      // warnings/auto-cal
+    { "sys",   "mtstatus",     h_sys_mtstatus },      // boot/warnings/auto-cal
     { "sys",   "fxtest",       h_sys_fxtest },
 
     // odrv.* (read-only; Configurator não escreve hardware aqui)
